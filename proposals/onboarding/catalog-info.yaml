@@ -1,0 +1,105 @@
+# saga-pattern catalog — 納管建議草稿（agent-onboard，2026-10-03）。
+#
+# 這是「提案」，不是生效設定：本檔位於 proposals/onboarding/，不是 factory-score 或
+# factory-run 的讀取路徑（docs/27 §2）。人類審核後把 3 個 TODO 換成裁定值並親手搬檔，
+# 三軸才會生效（docs/05 §1.1 核心不變量——agent 不得寫入 guardrail 正位）。
+#
+# 格式對齊機制 repo（aswf-dev/software_factory）的 catalog-info.yaml：
+# annotations（三軸 + automerge + 技術棧）與 spec。
+#
+# ⚠️ 合法值以 src/scoring/types.ts 為單一真相來源：
+#   factory.io/business-criticality: tactical | operational | strategic
+#   factory.io/risk-profile:         low | medium | high
+#   factory.io/complexity:           low | medium | high
+# 值缺席或非法一律 fail-safe 計為 2（最高風險級，且無錯誤訊息）——不要自創值
+# （如過去模板誤用的幽靈值 `supporting`），見 docs/27 §7.2。
+#
+# 掃描基準：tradingbot-tw/saga-pattern @ software-factory 565bf09（30 個 Java 檔，
+# 詳見同目錄 README.md 的掃描摘要）。
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: saga-pattern
+  description: Orkes Conductor Saga Pattern 餐點外送範例（Java / Spring Boot 3.2.3 / Gradle；單一 SQLite）
+  annotations:
+    github.com/project-slug: tradingbot-tw/saga-pattern
+
+    # --- Factory oversight axes (docs/06 §3) ---
+    #
+    # 建議 tactical (0)：內部學習用範例，非正式服務。
+    #   Issue #3 自述「以 Orkes Conductor 示範 Saga Pattern 的事件驅動 Java（Gradle）
+    #   範例專案」、「使用者：內部團隊（工廠試點、學習用）」、「壞掉的話會怎樣：僅影響
+    #   範例與試點驗證，無正式環境或外部使用者」。
+    #   證據：README.md 開頭即 "This is an example project showing how to build event
+    #   driven applications using Conductor"，且要求先 `docker run ... conductor-
+    #   standalone:3.15.0` 才跑得動；唯一進入點 OrderServiceController 的
+    #   `/triggerFoodDeliveryFlow` 只呼叫 WorkflowService 啟動外部 workflow；
+    #   repo 內無 Dockerfile、無 k8s、無部署或 CI 設定（git ls-files 共 34 檔，全為
+    #   原始碼與建置檔）。
+    #   為何不是 operational：本 repo 不承載任何正式服務或客戶資料流，故障只影響範例試跑。
+    #   （tactical 已是量表最低值，無更低選項。）
+    factory.io/business-criticality: TODO
+
+    # 建議 low (0)：無真實認證、無真實金流、無加密/金鑰管理、無 PII 處理邏輯。
+    #   證據（實際看過）：
+    #   - 認證：全 repo grep auth/security/password/token/secret 只命中
+    #     src/main/resources/application.properties 的憑證「佔位符」與註解；
+    #     OrderServiceController 無任何 security 設定。無授權決策程式碼。
+    #   - 金流是模擬：PaymentService.makePayment() 只驗信用卡到期日後就 `return true`，
+    #     原註解寫明「Ideally an async call would be made with a callback / But, we're
+    #     skipping that and assuming payment went through」；金額原樣寫入本機 SQLite
+    #     （PaymentsDAO.insertPayment），無 gateway、無匯率/稅/結算計算。
+    #   - 憑證是假的：application.properties 的 conductor.security.client.key-id=<key>、
+    #     secret=<secret>、spring.datasource.password=admin 皆為 demo 佔位符/本機值。
+    #   - PII 是假資料：BaseDAO.createTables() 的種子資料為 john.smith@example.com 等
+    #     範例帳號（無真實個資）。
+    #   需留意的殘餘風險（因此不評更低，也不無條件說「零風險」）：
+    #   pojos/PaymentDetails.java 帶卡號 number/expiry/cvv；pojos/Customer.java 帶
+    #   email/name/contact；WorkflowService 會把 customerEmail/Name/Contact 送進外部
+    #   Conductor（play.orkes.io）的 workflow input。這些在 demo 假資料下運作，但變更
+    #   時仍值得人類看一眼——本提案以 risk-paths.yml 的 H3 精準涵蓋這些檔案，
+    #   而不是靠整體 risk 升級來達成。
+    #   為何不是 medium：無 authz、無真實金流、無加密/密鑰管理程式碼，且無正式環境或
+    #   真實憑證（評分對照：factory-scoreboard 因持有可外洩資料的 ingest 認證而評 medium，
+    #   docs/16 §5.1；本 repo 無對應的認證或資料外洩面）。
+    #   若人類認為「PII 外送到第三方 Conductor」本身即須整體升級，可裁定為 medium。
+    factory.io/risk-profile: TODO
+
+    # 建議 low (0)：單模組、單資料庫、單一對外端點，Saga 編排在 repo 之外。
+    #   證據（實際看過）：
+    #   - 30 個 Java 檔、單一 Gradle 專案（settings.gradle：
+    #     rootProject.name = 'conductor-examples-food-delivery'）、單一 Spring Boot
+    #     進入點 SagaApplication.java。
+    #   - 單一對外 REST 端點：@PostMapping("/triggerFoodDeliveryFlow")，
+    #     controller 套件下只有 OrderServiceController.java。
+    #   - 單一 SQLite（jdbc:sqlite:food_delivery.db），7 張表由 DAO/BaseDAO.java 以
+    #     內嵌 `CREATE TABLE` + tableExists() 守衛建立，無 migration 框架。
+    #   - 關鍵：Saga 編排不在版控內。WorkflowService.startFoodDeliveryWorkflow() 只
+    #     `request.setName("FoodDeliveryWorkflow")` 後呼叫外部 Conductor server 啟動，
+    #     workflow 定義與補償邏輯在 Conductor（play.orkes.io），repo 內看不到。
+    #     4 個 domain service（Order/Inventory/Payment/Shipment）與 ConductorWorkers
+    #     都只是同一行程內的 worker 註冊，不是跨服務協調（無 MQ、無 RPC client、
+    #     無多 repo 相依）。
+    #   為何不是 medium：對照 docs/16 §5.1，15 個檔案、單表、6 端點、無跨服務協調的
+    #   factory-scoreboard 已評 low；本 repo 雖較大，但同為單模組、單 DB、單端點，
+    #   且沒有 message queue、第三方服務 client 或 migration 這些複雜度來源。
+    #   為何不是 high：無分散式元件、無多模組、無 DB 遷移、無公開 API 版本演進。
+    factory.io/complexity: TODO
+
+    # 新納管 repo 不預設開放自動合併（docs/27 §7；機制 repo 同值）。
+    factory.io/agent-automerge: "false"
+
+    # --- 技術棧規範（依實際掃描結果填寫；非風險裁定）---
+    # stack：Gradle 建置的 Java / Spring Boot 3.2.3 應用（build.gradle：plugins
+    #   `java` + `org.springframework.boot 3.2.3` + lombok 8.6）。
+    factory.io/stack: java-springboot
+    # test-framework：build.gradle 宣告 JUnit 5（junit-bom 5.9.1 + junit-jupiter +
+    #   `test { useJUnitPlatform() }`）。注意：repo 目前無 src/test（尚無測試），
+    #   此值描述的是「已宣告可用的測試框架」，與 docs/16 §5 的 spring-modulith 範例一致。
+    factory.io/test-framework: junit
+
+spec:
+  type: service
+  lifecycle: experimental
+  # 沿用機制 repo 的 owner；若應指向 tradingbot-tw 的團隊，請人類於搬檔前一併更正。
+  owner: group:default/factory-team
