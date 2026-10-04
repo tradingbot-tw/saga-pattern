@@ -1,0 +1,36 @@
+name: CI
+
+# 這個檔案在 main 與 software-factory（工廠 trunk）都要存在：pull_request 事件執行的是
+# 合併後的樹，base 分支沒有這個檔案時，該 PR 不會有 CI 檢查。兩邊都放，工廠 PR 與
+# 一般 PR 才都會被檢查（兩個分支目前指向同一個 commit）。
+on:
+  push:
+    branches: [main, software-factory]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Gradle 版本由 wrapper 決定（gradle/wrapper/gradle-wrapper.properties），
+      # setup-gradle 會驗證 wrapper jar 的完整性，不另外指定版本以免漂移。
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Gradle test
+        run: ./gradlew test --stacktrace
+
+      # 失敗時保留測試報告，方便在 Actions 頁面直接下載排查。
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/reports/tests/test
+          if-no-files-found: ignore
