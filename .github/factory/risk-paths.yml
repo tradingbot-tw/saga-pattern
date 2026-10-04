@@ -1,0 +1,78 @@
+# saga-pattern risk hard rules — 納管建議草稿（agent-onboard，2026-10-03）。
+#
+# 觸及下列任一 pattern → risk = 2，無裁量空間（docs/06 §3.2, §5.2）。
+# H1–H4 源自 Gartner G00843405；H5–H7 為本專案擴充（guardrail 自我保護與不可逆操作）。
+# 此檔位於 .github/ 下，受 CODEOWNERS 保護——agent 不得修改約束自己的規則
+# （docs/05 §1.1）。本檔目前在 proposals/onboarding/ 是提案，不是讀取路徑；
+# 人類審核後親手 `git mv` 至 .github/factory/risk-paths.yml 才生效（docs/27 §7.3）。
+#
+# 撰寫原則（docs/16 §5.3 實證教訓）：**依實際目錄結構撰寫，絕不複製範本**。
+# 每條 glob 下方註解標明本次掃描命中的實際檔案；沒有對應結構的規則保留 id 但留空。
+# 掃描依據：tradingbot-tw/saga-pattern @ software-factory 565bf09，`git ls-files`
+# 共 34 個檔案（30 個 Java 原始檔、build.gradle、settings.gradle、
+# src/main/resources/application.properties、README.md）。
+#
+# ⚠️ 樣式以 minimatch（case-sensitive, dot:true）比對（src/scoring/score.ts）。
+# 本次已用 minimatch 對實際檔案清單實測每條 glob，命中結果即註解所列。
+hard_rules:
+  # H1 — 授權/認證邏輯
+  # 掃描未發現：全 repo 無 auth/authorization/security/permission 程式碼或目錄
+  # （grep 只命中 application.properties 的 Conductor 憑證佔位符，該檔歸 H3）。
+  # controller 無 security 設定、無 filter、無 token 驗證。待人類確認後補上。
+  H1: []
+
+  # H2 — 財務計算
+  # 命中 6 檔 payment 相關程式（service/dao/pojos）：
+  #   service/PaymentService.java（建立/取消/驗證付款流程）
+  #   dao/PaymentsDAO.java（payments 表寫入與狀態更新）
+  #   pojos/Payment.java、PaymentDetails.java、PaymentMethod.java、PaymentRequest.java
+  # 說明：本 repo 的付款是**模擬**（PaymentService.makePayment 僅檢查到期日就 return true，
+  # 見 catalog-info.yaml 的 risk-profile 理由）。仍納入 H2 是因為付款路徑的語意風險
+  # 高於其目前實作強度，且此 glob 精準限定 Payment* 檔名，不會誤中無關檔案
+  # （不同於 docs/16 §5.3 的 `**/token*` 教訓）。
+  H2:
+    - "src/main/java/**/Payment*.java" # → PaymentsDAO.java, Payment.java, PaymentDetails.java, PaymentMethod.java, PaymentRequest.java, PaymentService.java
+
+  # H3 — 敏感資料處理
+  # 憑證與付費卡資料；均為實際存在的檔案，非臆測。
+  H3:
+    - "src/main/resources/application.properties" # → 含 conductor.security.client.key-id/secret、spring.datasource.password=admin（目前皆為 demo 佔位符/本機值）
+    - "**/PaymentDetails.java" # → pojos/PaymentDetails.java，欄位 number/expiry/cvv（卡號與 CVV）
+    - "**/Customer.java" # → pojos/Customer.java，欄位 email/name/contact（PII 模型）
+  # 取捨：刻意不用 `**/*secret*`、`**/*token*` 這類泛樣式。本 repo 沒有任何檔名含
+  # secret/token，泛樣式在此是「死規則」；一旦日後新增設計用 token 檔就會誤報並訓練
+  # 審查者略過警訊（docs/16 §5.3）。故以實際檔案精準列出。
+  # 未納入但相關：Driver.java / Restaurant.java / Shipment.java 亦含 name/contact/address，
+  # 不過其為 demo 種子資料模型，變更頻率與敏感度低於上列三檔；人類可視需要加回。
+
+  # H4 — systems of record 與共用模組
+  # 命中整個 DAO 層——本 repo 唯一的資料存取與 DDL 所在：
+  #   dao/BaseDAO.java（sqlite 連線、7 張表 CREATE TABLE、種子資料）
+  #   dao/InventoryDAO.java、OrdersDAO.java、PaymentsDAO.java、ShipmentDAO.java
+  # BaseDAO 為 4 個 domain service 共用，是典型的 systems of record。
+  H4:
+    - "src/main/java/**/dao/**" # → BaseDAO.java, InventoryDAO.java, OrdersDAO.java, PaymentsDAO.java, ShipmentDAO.java
+
+  # H5 — guardrail 自身（agent 不得修改）。與 repo 結構無關，無條件寫入。
+  # 這些檔案目前不存在於 saga-pattern（尚未搬檔），規則在搬檔生效後開始保護。
+  H5:
+    - ".github/**" # → 目前無 .github/；搬檔後保護 .github/factory/risk-paths.yml 與 workflows
+    - "CODEOWNERS" # → 目前無 CODEOWNERS；搬檔後保護 guardrail 的正位
+    - "catalog-info.yaml" # → 目前無 catalog-info.yaml；人類搬檔後保護三軸
+    - ".dsh/skills/**" # → 目前無 .dsh/；未來若引入工廠技能則一併保護
+
+  # H6 — 資料庫 schema 遷移（不可逆）
+  # 掃描未發現 migrations/、Flyway/Liquibase 或任何獨立 schema 檔。
+  # 本 repo 的 DDL 內嵌於 dao/BaseDAO.java（`CREATE TABLE` + `tableExists()` 守衛，
+  # 7 張表）——該檔已由 H4 `src/main/java/**/dao/**` 涵蓋並會觸發 risk=2。
+  # 故不另設 H6 glob，避免同一檔案被兩條規則重複標記；若人類認為 DDL 變更應語意上
+  # 屬於 H6，可加入 `src/main/java/**/dao/BaseDAO.java`。此處留空待人類確認。
+  H6: []
+
+  # H7 — 對外 API 破壞性變更
+  # 本 repo 唯一對外 HTTP 合約：OrderServiceController 的
+  # @PostMapping("/triggerFoodDeliveryFlow") 及其 request body FoodDeliveryRequest。
+  # 掃描未發現 openapi.yaml / *.proto / api/ 目錄，故不套用範本的 `api/**` 等樣式。
+  H7:
+    - "src/main/java/**/controller/**" # → controller/OrderServiceController.java
+    - "**/FoodDeliveryRequest.java" # → pojos/FoodDeliveryRequest.java（API request body schema；controller 回傳 Map，無 response DTO）
