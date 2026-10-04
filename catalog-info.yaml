@@ -38,7 +38,7 @@ metadata:
     #   原始碼與建置檔）。
     #   為何不是 operational：本 repo 不承載任何正式服務或客戶資料流，故障只影響範例試跑。
     #   （tactical 已是量表最低值，無更低選項。）
-    factory.io/business-criticality: TODO
+    factory.io/business-criticality: tactical
 
     # 建議 low (0)：無真實認證、無真實金流、無加密/金鑰管理、無 PII 處理邏輯。
     #   證據（實際看過）：
@@ -63,7 +63,7 @@ metadata:
     #   真實憑證（評分對照：factory-scoreboard 因持有可外洩資料的 ingest 認證而評 medium，
     #   docs/16 §5.1；本 repo 無對應的認證或資料外洩面）。
     #   若人類認為「PII 外送到第三方 Conductor」本身即須整體升級，可裁定為 medium。
-    factory.io/risk-profile: TODO
+    factory.io/risk-profile: low
 
     # 建議 low (0)：單模組、單資料庫、單一對外端點，Saga 編排在 repo 之外。
     #   證據（實際看過）：
@@ -84,7 +84,7 @@ metadata:
     #   factory-scoreboard 已評 low；本 repo 雖較大，但同為單模組、單 DB、單端點，
     #   且沒有 message queue、第三方服務 client 或 migration 這些複雜度來源。
     #   為何不是 high：無分散式元件、無多模組、無 DB 遷移、無公開 API 版本演進。
-    factory.io/complexity: TODO
+    factory.io/complexity: low
 
     # 新納管 repo 不預設開放自動合併（docs/27 §7；機制 repo 同值）。
     factory.io/agent-automerge: "false"
