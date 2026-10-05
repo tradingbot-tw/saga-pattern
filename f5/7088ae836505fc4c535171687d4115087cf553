@@ -1,0 +1,14 @@
+.gitignore
+  h_a7614621effce7 1-99
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f57088ae836505fc4c535171687d4115087cf553",
+  "prompts": {},
+  "humans": {
+    "h_a7614621effce7": {
+      "author": "tradingbot-tw <tradingbot.tw@gmail.com>"
+    }
+  }
+}
