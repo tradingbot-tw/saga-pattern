@@ -99,8 +99,10 @@ public class ConductorWorkers {
         return result;
     }
 
+    // 簽名先行（Issue #24 G2 的測試基礎設施）：輸入型別由 Order 換成最小輸入物件，
+    // 行為暫維持有空輸出——placeholder 語意（notified=false）由 02-impl 層實作。
     @WorkerTask(value = "notify_customer", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> checkForCustomerNotifications(Order order) {
+    public Map<String, Object> checkForCustomerNotifications(CustomerNotificationRequest customerNotificationRequest) {
         Map<String, Object> result = new HashMap<>();
         return result;
     }
