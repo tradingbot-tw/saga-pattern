@@ -1,0 +1,73 @@
+# Factory module list (ADR-023 附錄 A.2) — tradingbot-tw/saga-pattern
+#
+# 由 aswf.dev 模組清單編輯器產生。readiness 是人類裁定（HG2），並必須附 readiness_evidence；
+# 系統層級的 process spec 在機制 repo（aswf-dev/software_factory:processes/<owner>/<repo>.yaml）。
+system: tradingbot-tw/saga-pattern
+modules:
+  - id: ordering
+    paths:
+      - "src/main/java/io/orkes/example/saga/controller/**"
+      - src/main/java/io/orkes/example/saga/service/OrderService.java
+      - src/main/java/io/orkes/example/saga/dao/OrdersDAO.java
+      - "src/main/java/io/orkes/example/saga/pojos/Order*.java"
+      - src/main/java/io/orkes/example/saga/pojos/Customer.java
+      - src/main/java/io/orkes/example/saga/pojos/FoodItem.java
+      - src/main/java/io/orkes/example/saga/pojos/Restaurant.java
+      - src/test/java/io/orkes/example/saga/dao/OrdersDAOTest.java
+    build_unit: ./gradlew test --no-daemon
+    spec: docs/architecture.md
+    readiness: R1
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    owner: tradingbot-tw
+  - id: inventory
+    paths:
+      - src/main/java/io/orkes/example/saga/service/InventoryService.java
+      - src/main/java/io/orkes/example/saga/dao/InventoryDAO.java
+      - src/main/java/io/orkes/example/saga/pojos/CheckInventoryRequest.java
+      - src/main/java/io/orkes/example/saga/pojos/FoodDeliveryRequest.java
+    build_unit: ./gradlew test --no-daemon
+    spec: docs/architecture.md
+    readiness: R0
+    readiness_evidence: "'no tests cover InventoryService / InventoryDAO (src/test has none)'"
+    owner: tradingbot-tw
+  - id: payment
+    paths:
+      - src/main/java/io/orkes/example/saga/service/PaymentService.java
+      - src/main/java/io/orkes/example/saga/dao/PaymentsDAO.java
+      - "src/main/java/io/orkes/example/saga/pojos/Payment*.java"
+      - src/test/java/io/orkes/example/saga/service/PaymentServiceTest.java
+      - src/test/java/io/orkes/example/saga/dao/PaymentsDAOTest.java
+    build_unit: ./gradlew test --no-daemon
+    spec: docs/architecture.md
+    readiness: R1
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    owner: tradingbot-tw
+  - id: shipment
+    paths:
+      - src/main/java/io/orkes/example/saga/service/ShipmentService.java
+      - src/main/java/io/orkes/example/saga/dao/ShipmentDAO.java
+      - src/main/java/io/orkes/example/saga/pojos/Shipment.java
+      - src/main/java/io/orkes/example/saga/pojos/ShippingRequest.java
+      - "src/main/java/io/orkes/example/saga/pojos/Driver*.java"
+      - src/main/java/io/orkes/example/saga/pojos/CancelRequest.java
+      - src/test/java/io/orkes/example/saga/dao/ShipmentDAOTest.java
+    build_unit: ./gradlew test --no-daemon
+    spec: docs/architecture.md
+    readiness: R1
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    owner: tradingbot-tw
+  - id: workflow
+    paths:
+      - src/main/java/io/orkes/example/saga/SagaApplication.java
+      - src/main/java/io/orkes/example/saga/service/WorkflowService.java
+      - "src/main/java/io/orkes/example/saga/workers/**"
+      - src/main/java/io/orkes/example/saga/dao/BaseDAO.java
+      - src/test/java/io/orkes/example/saga/SagaTestDb.java
+      - src/test/java/io/orkes/example/saga/dao/SeedDataTest.java
+      - src/test/java/io/orkes/example/saga/service/WorkflowServiceTest.java
+      - "src/test/java/io/orkes/example/saga/workers/**"
+    build_unit: ./gradlew test --no-daemon
+    spec: docs/architecture.md
+    readiness: R1
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    owner: tradingbot-tw
