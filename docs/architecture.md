@@ -198,8 +198,28 @@ sequenceDiagram
   （`workers/ConductorWorkers.java:71-76`）。
 - `ship_food`：司機指派失敗（`driverId == 0`）時回 `FAILED`（可重試）；成功時 output 帶
   `driverId`（`workers/ConductorWorkers.java:83-103`）。
-- 補償 worker `cancel_payment`／`cancel_delivery`／`cancel_order` 皆回傳空 `Map`，未設定失敗狀態
-  （`workers/ConductorWorkers.java:108-128`）。
+- 補償 worker `cancel_payment`／`cancel_delivery`／`cancel_order`（Issue #34）皆回傳
+  `TaskResult`，失敗不是 best-effort（語意由人類裁定）：
+  - 成功 → `COMPLETED`
+  - 資料庫例外 → `FAILED`（可重試）
+  - 目標不存在（查無訂單、付款或外送單）→ `FAILED_WITH_TERMINAL_ERROR`
+  - 失敗原因一律寫入 `reasonForIncompletion`
+
+| Task | 成功 | 目標不存在 | 資料庫例外 |
+| --- | --- | --- | --- |
+| `cancel_payment` | `COMPLETED` | `FAILED_WITH_TERMINAL_ERROR`（查無付款） | `FAILED`（可重試） |
+| `cancel_delivery` | `COMPLETED` | `FAILED_WITH_TERMINAL_ERROR`（查無外送單） | `FAILED`（可重試） |
+| `cancel_order` | `COMPLETED` | `FAILED_WITH_TERMINAL_ERROR`（查無訂單） | `FAILED`（可重試） |
+
+DAO 的更新方法（`OrdersDAO.updateOrder`／`cancelOrder`、`PaymentsDAO.updatePaymentStatus`／
+`cancelPaymentsByOrderId`、`ShipmentDAO.cancelShipment`）回傳受影響的列數；`SQLException` 包裝成
+`DataAccessException`，不再只印訊息。`0` 列代表目標不存在，由 worker 轉成 terminal error。
+`cancel_payment` 以 `UPDATE payments SET status='CANCELED' WHERE orderId=?` 一次取消同一訂單的
+**所有**付款（舊行為只取消 `readPayment` 讀到的最後一筆）。`cancel_order` 只更新 status，不會用
+補償時不完整的 `Order` 覆寫 `restaurantId`／`deliveryAddress`。
+
+> 本 Issue 未改動 `order_food`、`check_inventory`、`make_payment`、`ship_food`、
+> `notify_driver`、`notify_customer` 的 worker 程式與 task 名稱；workflow 定義與補償連結仍屬 TB2。
 
 ```mermaid
 flowchart TD
@@ -227,6 +247,8 @@ flowchart TD
   `api-triggered`（`service/WorkflowService.java:26`），無法用它區分不同請求。
 - 重試策略（`retryCount`、`retryLogic`、timeout）全部在 Conductor workflow 定義內，repo 無從得知。
 - worker 只設定了執行緒數與輪詢間隔（`@WorkerTask(...)`），非重試策略。
+- 補償重試的冪等與交易邊界**不在** Issue #34 的範圍（屬 TB1 報告 §7.3）；本 Issue 只讓
+  `cancel_*` 對每次嘗試如實回報 `COMPLETED`／`FAILED`／`FAILED_WITH_TERMINAL_ERROR`。
 
 ## 資料模型
 
