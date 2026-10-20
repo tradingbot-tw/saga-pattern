@@ -137,10 +137,19 @@ flowchart LR
 | `make_payment` | `makePaymentTask` | 2 / 300ms | 正向 |
 | `ship_food` | `shipFoodTask` | 2 / 300ms | 正向 |
 | `notify_driver` | `checkForDriverNotifications` | 2 / 300ms | 通知（目前為 no-op） |
-| `notify_customer` | `checkForCustomerNotifications` | 2 / 300ms | 通知（目前為 no-op） |
+| `notify_customer` | `checkForCustomerNotifications` | 2 / 300ms | 通知 placeholder（不寄送） |
 | `cancel_payment` | `cancelPaymentTask` | 2 / 300ms | 補償 |
 | `cancel_delivery` | `cancelDeliveryTask` | 2 / 300ms | 補償 |
 | `cancel_order` | `cancelOrderTask` | 2 / 300ms | 補償 |
+
+#### `ship_food` 與 `notify_customer` 的輸入／輸出契約（Issue #24）
+
+Issue #24 修正了兩個原本無法被 workflow 定義綁定的接縫：
+
+| Task | 輸入 | 成功 output | 說明 |
+| --- | --- | --- | --- |
+| `ship_food` | `ShippingRequest`（`orderId`、`deliveryAddress`、`deliveryInstructions`） | `driverId` | 值為 `ShipmentService.createShipment` 回傳並已持久化到 `shipments.driverId` 的司機 id；失敗時不輸出 `driverId`，供 `notify_driver` 綁定。 |
+| `notify_customer` | `CustomerNotificationRequest`（`orderId`、`customerEmail`、`customerName`） | `orderId`、`notified=false` | 僅使用 workflow 起始輸入可提供的欄位；**不實際寄送通知**，`notified=false` 明確標示 placeholder。 |
 
 > ⚠️ **推論**：task 之間的先後順序與補償觸發條件由 Conductor 上的 workflow 定義決定，**不在本 repo**。
 > 下圖僅依 task 命名慣例與 worker 的狀態語意排列，實際順序須向 Conductor workflow 定義確認（見「待確認問題」）。
@@ -173,9 +182,9 @@ sequenceDiagram
     K-->>S: COMPLETED {paymentId, paymentStatus}
     S->>K: ship_food
     K->>K: ShipmentService.createShipment() → shipments
-    K-->>S: COMPLETED
+    K-->>S: COMPLETED {driverId}
     S->>K: notify_driver / notify_customer
-    K-->>S: COMPLETED（空輸出）
+    K-->>S: COMPLETED（notify_driver 空輸出；notify_customer {notified=false}）
 ```
 
 ### 失敗與補償路徑
@@ -187,7 +196,8 @@ sequenceDiagram
   （`workers/ConductorWorkers.java:51-56`）——terminal error 不會重試。
 - `make_payment`：付款狀態非 `SUCCESSFUL` 時回 `FAILED_WITH_TERMINAL_ERROR`
   （`workers/ConductorWorkers.java:71-76`）。
-- `ship_food`：司機指派失敗（`driverId == 0`）時回 `FAILED`（可重試）（`workers/ConductorWorkers.java:88-92`）。
+- `ship_food`：司機指派失敗（`driverId == 0`）時回 `FAILED`（可重試）；成功時 output 帶
+  `driverId`（`workers/ConductorWorkers.java:83-103`）。
 - 補償 worker `cancel_payment`／`cancel_delivery`／`cancel_order` 皆回傳空 `Map`，未設定失敗狀態
   （`workers/ConductorWorkers.java:108-128`）。
 
@@ -356,8 +366,9 @@ flowchart LR
    `paymentMethod` 為 `Object`（`pojos/FoodDeliveryRequest.java:13,18`），而 worker 端預期
    `ArrayList<FoodItem>`、`PaymentMethod`（`pojos/CheckInventoryRequest.java:10`、`pojos/PaymentRequest.java:10`），
    兩端型別對齊依賴 Conductor 的序列化行為，無編譯期保證。
-6. **`notify_driver` / `notify_customer` 為空實作**：回傳空 Map，未做任何通知
-   （`workers/ConductorWorkers.java:96-106`）。
+6. **`notify_driver` / `notify_customer` 不實際寄送通知**：`notify_driver` 回傳空 Map；
+   `notify_customer` 接受 `CustomerNotificationRequest` 並在 output 標示 `notified=false`
+   （`workers/ConductorWorkers.java:105-125`）。
 7. **付款為模擬**：`makePayment()` 僅驗證信用卡到期日後即 `return true`
    （`service/PaymentService.java:60-84`）。
 8. **錯誤處理只印訊息**：多數 DAO 例外出錯僅 `System.out.println`，且未回報呼叫端
