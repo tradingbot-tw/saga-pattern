@@ -2,6 +2,7 @@ package io.orkes.example.saga.workers;
 
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import io.orkes.example.saga.SagaTestDb;
+import io.orkes.example.saga.dao.PaymentsDAO;
 import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.CancelRequest;
 import io.orkes.example.saga.pojos.CheckInventoryRequest;
@@ -10,6 +11,7 @@ import io.orkes.example.saga.pojos.DriverNotificationRequest;
 import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
+import io.orkes.example.saga.pojos.Payment;
 import io.orkes.example.saga.pojos.PaymentDetails;
 import io.orkes.example.saga.pojos.PaymentMethod;
 import io.orkes.example.saga.pojos.PaymentRequest;
@@ -18,14 +20,19 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -236,34 +243,36 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @DisplayName("補償/回滾：cancel_order 把已建立的訂單轉為 CANCELLED")
+    @DisplayName("補償/回滾：cancel_order 成功時回 COMPLETED 並把訂單轉為 CANCELLED")
     void cancelOrderRollsBackCreatedOrder() {
         String orderId = String.valueOf(workers.orderFoodTask(orderRequest()).getOutputData().get("orderId"));
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        Map<String, Object> result = workers.cancelOrderTask(cancelRequest);
+        TaskResult result = workers.cancelOrderTask(cancelRequest);
 
-        assertTrue(result.isEmpty(), "補償步驟成功時回傳空輸出，實際為: " + result);
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus(), "補償成功必須回報 COMPLETED");
+        assertTrue(result.getOutputData().isEmpty(), "補償步驟成功時回傳空輸出，實際為: " + result.getOutputData());
         assertEquals(Order.Status.CANCELLED, OrderService.getOrder(orderId).getStatus());
     }
 
     @Test
-    @DisplayName("補償/回滾：cancel_payment 把已成立的付款改為 CANCELED")
+    @DisplayName("補償/回滾：cancel_payment 成功時回 COMPLETED 並把付款改為 CANCELED")
     void cancelPaymentRollsBackSuccessfulPayment() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        workers.cancelPaymentTask(cancelRequest);
+        TaskResult result = workers.cancelPaymentTask(cancelRequest);
 
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus(), "補償成功必須回報 COMPLETED");
         assertEquals("CANCELED", SagaTestDb.queryString(URL,
                 "SELECT status FROM payments WHERE orderId = '" + orderId + "'"));
     }
 
     @Test
-    @DisplayName("補償/回滾：cancel_delivery 把已排定的外送單改為 CANCELED")
+    @DisplayName("補償/回滾：cancel_delivery 成功時回 COMPLETED 並把外送單改為 CANCELED")
     void cancelDeliveryRollsBackScheduledShipment() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         Shipment shipment = new Shipment();
@@ -275,10 +284,183 @@ class ConductorWorkersTest {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        workers.cancelDeliveryTask(cancelRequest);
+        TaskResult result = workers.cancelDeliveryTask(cancelRequest);
 
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus(), "補償成功必須回報 COMPLETED");
         assertEquals("CANCELED", SagaTestDb.queryString(URL,
                 "SELECT status FROM shipments WHERE orderId = '" + orderId + "'"));
+    }
+
+    /**
+     * Issue #34（G3）：補償失敗必須讓 task 失敗並能被告警（人類裁定，TB1 報告 §9 第 4 題），
+     * 語意為——成功 → {@code COMPLETED}；資料庫例外 → {@code FAILED}（可重試）；
+     * 目標不存在 → {@code FAILED_WITH_TERMINAL_ERROR}；失敗原因寫進 {@code reasonForIncompletion}。
+     *
+     * <p>以下測試重現既有缺陷（回傳 Map 一律 COMPLETED、DAO 吞掉 SQLException），
+     * 在修復（02-impl）前為紅燈，故以 {@code @Disabled} 交付，讓 01-test 層單獨 CI 綠燈。
+     */
+    @Test
+    @DisplayName("失敗語意：cancel_order 對不存在的 orderId 不得回報成功，應回終端錯誤並給原因")
+    @Disabled("Issue #34 紅燈測試：cancel_* 尚未回傳 TaskResult 失敗語意，於 02-impl un-skip")
+    void cancelOrderFailsTerminallyForUnknownOrderId() {
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(SagaTestDb.uniqueId("ghost-order"));
+
+        TaskResult result = workers.cancelOrderTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus(),
+                "查無訂單不是可重試的失敗，不得標成 COMPLETED");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion，供告警讀取");
+        assertTrue(result.getReasonForIncompletion().contains(cancelRequest.getOrderId()),
+                "原因應指出是哪一筆訂單找不到，實際為: " + result.getReasonForIncompletion());
+    }
+
+    @Test
+    @DisplayName("失敗語意：cancel_payment 查無可取消的付款時應回終端錯誤並給原因")
+    @Disabled("Issue #34 紅燈測試：cancel_* 尚未回傳 TaskResult 失敗語意，於 02-impl un-skip")
+    void cancelPaymentFailsTerminallyWhenNoPaymentExists() {
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(SagaTestDb.uniqueId("ghost-order"));
+
+        TaskResult result = workers.cancelPaymentTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus(),
+                "沒有可取消的付款時不得標成 COMPLETED");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion，供告警讀取");
+        assertTrue(result.getReasonForIncompletion().contains(cancelRequest.getOrderId()),
+                "原因應指出是哪一筆訂單查無付款，實際為: " + result.getReasonForIncompletion());
+    }
+
+    @Test
+    @DisplayName("失敗語意：cancel_delivery 查無可取消的外送單時應回終端錯誤並給原因")
+    @Disabled("Issue #34 紅燈測試：cancel_* 尚未回傳 TaskResult 失敗語意，於 02-impl un-skip")
+    void cancelDeliveryFailsTerminallyWhenNoShipmentExists() {
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(SagaTestDb.uniqueId("ghost-order"));
+
+        TaskResult result = workers.cancelDeliveryTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus(),
+                "沒有可取消的外送單時不得標成 COMPLETED");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion，供告警讀取");
+        assertTrue(result.getReasonForIncompletion().contains(cancelRequest.getOrderId()),
+                "原因應指出是哪一筆訂單查無外送單，實際為: " + result.getReasonForIncompletion());
+    }
+
+    @Test
+    @DisplayName("失敗語意：cancel_payment 遭遇資料庫例外時回 FAILED（可重試）並帶原因")
+    @Disabled("Issue #34 紅燈測試：資料庫例外尚未轉為可重試的 FAILED，於 02-impl un-skip")
+    void cancelPaymentFailsRetryablyOnDatabaseError() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
+
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(orderId);
+
+        TaskResult result = withAppDatabaseUnavailable(() -> workers.cancelPaymentTask(cancelRequest));
+
+        assertEquals(TaskResult.Status.FAILED, result.getStatus(),
+                "資料庫例外是可修正的失敗，應讓 Conductor retry policy 接管，而不是 terminal error 或 COMPLETED");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion，供告警讀取");
+    }
+
+    @Test
+    @DisplayName("失敗語意：cancel_delivery 遭遇資料庫例外時回 FAILED（可重試）並帶原因")
+    @Disabled("Issue #34 紅燈測試：資料庫例外尚未轉為可重試的 FAILED，於 02-impl un-skip")
+    void cancelDeliveryFailsRetryablyOnDatabaseError() throws Exception {
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(SagaTestDb.uniqueId("order"));
+
+        TaskResult result = withAppDatabaseUnavailable(() -> workers.cancelDeliveryTask(cancelRequest));
+
+        assertEquals(TaskResult.Status.FAILED, result.getStatus(),
+                "資料庫例外必須讓 task 失敗且可重試，不得被 DAO 吞掉後標成 COMPLETED");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion，供告警讀取");
+    }
+
+    @Test
+    @DisplayName("失敗語意：cancel_order 遭遇資料庫例外時回 FAILED（可重試）而非查無訂單的終端錯誤")
+    @Disabled("Issue #34 紅燈測試：資料庫例外尚未轉為可重試的 FAILED，於 02-impl un-skip")
+    void cancelOrderFailsRetryablyOnDatabaseError() throws Exception {
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(SagaTestDb.uniqueId("order"));
+
+        TaskResult result = withAppDatabaseUnavailable(() -> workers.cancelOrderTask(cancelRequest));
+
+        assertEquals(TaskResult.Status.FAILED, result.getStatus(),
+                "資料庫壞掉不等於訂單不存在，應回可重試的 FAILED，不得誤判為終端錯誤");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion，供告警讀取");
+    }
+
+    @Test
+    @DisplayName("多筆付款：cancel_payment 對同一 orderId 的多筆付款要全部取消")
+    @Disabled("Issue #34 紅燈測試：cancel_payment 只取消讀到的那一筆，於 02-impl un-skip")
+    void cancelPaymentCancelsEveryPaymentOfTheOrder() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        PaymentsDAO paymentsDAO = new PaymentsDAO(URL);
+        assertTrue(paymentsDAO.insertPayment(recordedPayment(orderId)).isEmpty());
+        assertTrue(paymentsDAO.insertPayment(recordedPayment(orderId)).isEmpty());
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(orderId);
+
+        TaskResult result = workers.cancelPaymentTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+        assertEquals(2, SagaTestDb.count(URL, "SELECT COUNT(*) FROM payments WHERE orderId = '"
+                + orderId + "' AND status = 'CANCELED'"), "同一訂單的所有付款都必須被補償取消");
+        assertEquals(0, SagaTestDb.count(URL, "SELECT COUNT(*) FROM payments WHERE orderId = '"
+                + orderId + "' AND status != 'CANCELED'"), "不得留下未取消的付款");
+    }
+
+    /** 一筆已成立（SUCCESSFUL）的付款紀錄，供直接寫入測試資料庫。 */
+    private static Payment recordedPayment(String orderId) {
+        PaymentDetails details = new PaymentDetails();
+        details.setNumber("4111111111111111");
+        details.setExpiry("12/2099");
+        details.setCvv(123);
+
+        PaymentMethod method = new PaymentMethod();
+        method.setType("Credit Card");
+        method.setDetails(details);
+
+        Payment payment = new Payment();
+        payment.setPaymentId(SagaTestDb.uniqueId("payment"));
+        payment.setOrderId(orderId);
+        payment.setAmount(10.0);
+        payment.setPaymentMethod(method);
+        payment.setStatus(Payment.Status.SUCCESSFUL);
+        return payment;
+    }
+
+    /**
+     * 暫時移開應用資料庫檔（{@code food_delivery.db}）以模擬「資料庫不可用」，
+     * 讓 DAO 在連線/語句層碰到真實的 {@code SQLException}，結束後原樣還原。
+     */
+    private static TaskResult withAppDatabaseUnavailable(SqlStage stage) throws Exception {
+        Path db = Paths.get(SagaTestDb.filePathOf(URL));
+        Path backupDir = Paths.get("build", "test-db-backup");
+        Files.createDirectories(backupDir);
+        Path backup = backupDir.resolve("food_delivery-" + UUID.randomUUID() + ".db");
+        boolean existed = Files.exists(db);
+        if (existed) {
+            Files.move(db, backup);
+        }
+        try {
+            return stage.run();
+        } finally {
+            if (existed && Files.exists(backup)) {
+                if (Files.exists(db)) {
+                    Files.delete(db);
+                }
+                Files.move(backup, db);
+            }
+            SagaTestDb.createAppSchema();
+        }
+    }
+
+    /** 資料庫不可用期間要執行的 worker 呼叫。 */
+    private interface SqlStage {
+        TaskResult run() throws Exception;
     }
 
     @Test

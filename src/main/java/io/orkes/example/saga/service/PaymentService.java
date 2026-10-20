@@ -49,12 +49,12 @@ public class PaymentService {
         return payment;
     }
 
-    public static void cancelPayment(String orderId) {
+    public static int cancelPayment(String orderId) {
         // Cancel Payment in DB
         Payment payment = new Payment();
         paymentsDAO.readPayment(orderId, payment);
         payment.setStatus(Payment.Status.CANCELED);
-        paymentsDAO.updatePaymentStatus(payment);
+        return paymentsDAO.updatePaymentStatus(payment);
     }
 
     private static boolean makePayment(Payment payment) {

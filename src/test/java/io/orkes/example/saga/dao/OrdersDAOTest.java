@@ -7,16 +7,19 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -159,5 +162,32 @@ class OrdersDAOTest {
 
         assertEquals(null, read.getOrderId(), "查無訂單時不應覆蓋 orderId");
         assertEquals(null, read.getStatus(), "查無訂單時不應覆蓋 status");
+    }
+
+    @Test
+    @DisplayName("失敗語意（Issue #34）：updateOrder 更新不存在的列時回傳 0 列，不再只印訊息")
+    void updateOrderOnMissingRowReturnsZero() {
+        Order ghost = pendingOrder(SagaTestDb.uniqueId("ghost"));
+
+        assertEquals(0, dao.updateOrder(ghost),
+                "查無目標列必須讓 service 分得出來（回傳受影響列數 0），補償才能回報終端錯誤");
+    }
+
+    @Test
+    @DisplayName("失敗語意（Issue #34）：updateOrder 遭遇資料庫例外時拋出 DaoWriteException，不再吞掉")
+    @Disabled("Issue #34 紅燈測試：SQLException 尚未轉為可辨識例外，於 02-impl un-skip")
+    void updateOrderPropagatesDatabaseFailure() throws Exception {
+        String brokenUrl = SagaTestDb.tempUrl("broken-orders");
+        try {
+            OrdersDAO brokenDao = new OrdersDAO(brokenUrl);
+            Order order = pendingOrder(SagaTestDb.uniqueId("order"));
+
+            DaoWriteException thrown = assertThrows(DaoWriteException.class,
+                    () -> brokenDao.updateOrder(order),
+                    "資料庫寫入失敗必須拋出可辨識例外，讓補償 worker 回報 FAILED（可重試）");
+            assertTrue(thrown.getCause() instanceof SQLException, "例外需保留原始 SQLException 作為 cause");
+        } finally {
+            SagaTestDb.delete(brokenUrl);
+        }
     }
 }

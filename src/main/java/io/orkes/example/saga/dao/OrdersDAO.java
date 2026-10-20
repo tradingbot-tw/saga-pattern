@@ -59,7 +59,7 @@ public class OrdersDAO extends BaseDAO {
         return "";
     }
 
-    public void updateOrder(Order order) {
+    public int updateOrder(Order order) {
         String sql = "UPDATE orders SET restaurantId=?,deliveryAddress=?,status=? WHERE orderId=?";
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
@@ -67,9 +67,10 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(2, order.getDeliveryAddress());
             pstmt.setString(3, order.getStatus().name());
             pstmt.setString(4, order.getOrderId());
-            pstmt.executeUpdate();
+            return pstmt.executeUpdate();
         } catch (SQLException e) {
             System.out.println(e.getMessage());
+            return 0;
         }
     }
 

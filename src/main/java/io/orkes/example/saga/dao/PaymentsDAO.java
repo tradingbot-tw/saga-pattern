@@ -32,15 +32,16 @@ public class PaymentsDAO extends BaseDAO {
         return "";
     }
 
-    public void updatePaymentStatus(Payment payment) {
+    public int updatePaymentStatus(Payment payment) {
         String sql = "UPDATE payments SET status=? WHERE paymentId=?;";
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setString(1, payment.getStatus().name());
             pstmt.setString(2, payment.getPaymentId());
-            pstmt.executeUpdate();
+            return pstmt.executeUpdate();
         } catch (SQLException e) {
             System.out.println(e.getMessage());
+            return 0;
         }
     }
 

@@ -6,13 +6,16 @@ import io.orkes.example.saga.pojos.PaymentDetails;
 import io.orkes.example.saga.pojos.PaymentMethod;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.sql.SQLException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -128,6 +131,33 @@ class PaymentsDAOTest {
         assertEquals(4, Payment.Status.values().length);
         for (Payment.Status status : Payment.Status.values()) {
             assertEquals(status, Payment.Status.valueOf(status.name()));
+        }
+    }
+
+    @Test
+    @DisplayName("失敗語意（Issue #34）：updatePaymentStatus 更新不存在的列時回傳 0 列，不再只印訊息")
+    void updatePaymentStatusOnMissingRowReturnsZero() {
+        Payment ghost = pendingPayment(SagaTestDb.uniqueId("ghost-order"));
+
+        assertEquals(0, dao.updatePaymentStatus(ghost),
+                "查無目標列必須讓 service 分得出來（回傳受影響列數 0），補償才能回報終端錯誤");
+    }
+
+    @Test
+    @DisplayName("失敗語意（Issue #34）：updatePaymentStatus 遭遇資料庫例外時拋出 DaoWriteException，不再吞掉")
+    @Disabled("Issue #34 紅燈測試：SQLException 尚未轉為可辨識例外，於 02-impl un-skip")
+    void updatePaymentStatusPropagatesDatabaseFailure() throws Exception {
+        String brokenUrl = SagaTestDb.tempUrl("broken-payments");
+        try {
+            PaymentsDAO brokenDao = new PaymentsDAO(brokenUrl);
+            Payment payment = pendingPayment(SagaTestDb.uniqueId("order"));
+
+            DaoWriteException thrown = assertThrows(DaoWriteException.class,
+                    () -> brokenDao.updatePaymentStatus(payment),
+                    "資料庫寫入失敗必須拋出可辨識例外，讓補償 worker 回報 FAILED（可重試）");
+            assertTrue(thrown.getCause() instanceof SQLException, "例外需保留原始 SQLException 作為 cause");
+        } finally {
+            SagaTestDb.delete(brokenUrl);
         }
     }
 }

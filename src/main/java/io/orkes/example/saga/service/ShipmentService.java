@@ -46,8 +46,8 @@ public class ShipmentService {
         return driverId;
     }
 
-    public static void cancelDelivery(String orderId) {
-        shipmentDAO.cancelShipment(orderId);
+    public static int cancelDelivery(String orderId) {
+        return shipmentDAO.cancelShipment(orderId);
     }
 
     private static int findDriver() {

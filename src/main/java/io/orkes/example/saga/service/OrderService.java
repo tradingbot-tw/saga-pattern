@@ -64,9 +64,9 @@ public class OrderService {
         return order;
     }
 
-    public static void cancelOrder(Order order) {
+    public static int cancelOrder(Order order) {
         order.setStatus(Order.Status.CANCELLED);
         log.info("Cancelling order {}", order.getOrderId());
-        ORDERS_DAO.updateOrder(order);
+        return ORDERS_DAO.updateOrder(order);
     }
 }
