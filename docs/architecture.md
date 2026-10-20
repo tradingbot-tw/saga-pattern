@@ -2,6 +2,8 @@
 
 > 分析基準：`tradingbot-tw/saga-pattern` @ `3e8c20c`（trunk `software-factory`）。
 > 本文以**靜態分析**產出，所有陳述均附「證據索引」；推論處明確標示。若與實作不符，以程式碼為準。
+> 修訂：Issue #24 修正 `ship_food`／`notify_customer` 的輸入輸出契約（G1／G2），相關章節已隨實作更新，
+> `ConductorWorkers.java` 的行號引用以修正後版本為準。
 
 ## 系統概述
 
@@ -28,7 +30,7 @@ saga-pattern 是一個**教學用範例專案**，示範如何以 [Orkes Conduct
 **Saga 的編排（orchestration）不在本 repo 的版控範圍內。** 應用只負責：
 (1) 以名稱 `FoodDeliveryWorkflow`（version 1）向外部 Conductor server 啟動 workflow
 （`src/main/java/io/orkes/example/saga/service/WorkflowService.java:22-35`）；
-(2) 在同一行程內註冊 9 個 Conductor worker task（`src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:25-128`）。
+(2) 在同一行程內註冊 9 個 Conductor worker task（`src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:25-143`）。
 Workflow 的步驟順序、重試策略與補償關係定義在 Conductor server（預設 `play.orkes.io`），
 repo 內看不到，因此下文的 Saga 流程圖**依 task 名稱與 worker 行為推論**，並在圖中標示為推論。
 
@@ -115,7 +117,7 @@ flowchart LR
 | --- | --- | --- |
 | `OrderServiceController` | `controller/OrderServiceController.java:23-26` | 唯一 HTTP 進入點，轉呼叫 `WorkflowService` |
 | `WorkflowService` | `service/WorkflowService.java:22-60` | 組裝 workflow input、啟動 `FoodDeliveryWorkflow` |
-| `ConductorWorkers` | `workers/ConductorWorkers.java:21-128` | 註冊 9 個 worker task，呼叫 domain service |
+| `ConductorWorkers` | `workers/ConductorWorkers.java:21-145` | 註冊 9 個 worker task，呼叫 domain service |
 | `OrderService` | `service/OrderService.java:21-71` | 建立／讀取／取消訂單與客戶 |
 | `InventoryService` | `service/InventoryService.java:16-22` | 檢查餐廳是否存在（庫存檢查） |
 | `PaymentService` | `service/PaymentService.java:22-84` | 建立／取消付款、信用卡到期日驗證（模擬） |
@@ -135,12 +137,22 @@ flowchart LR
 | `order_food` | `orderFoodTask` | 3 / 300ms | 正向 |
 | `check_inventory` | `checkInventoryTask` | 2 / 300ms | 正向 |
 | `make_payment` | `makePaymentTask` | 2 / 300ms | 正向 |
-| `ship_food` | `shipFoodTask` | 2 / 300ms | 正向 |
+| `ship_food` | `shipFoodTask` | 2 / 300ms | 正向；成功時輸出 `driverId` |
 | `notify_driver` | `checkForDriverNotifications` | 2 / 300ms | 通知（目前為 no-op） |
-| `notify_customer` | `checkForCustomerNotifications` | 2 / 300ms | 通知（目前為 no-op） |
+| `notify_customer` | `checkForCustomerNotifications` | 2 / 300ms | 通知（placeholder，輸出 `notified=false`，不實際寄送） |
 | `cancel_payment` | `cancelPaymentTask` | 2 / 300ms | 補償 |
 | `cancel_delivery` | `cancelDeliveryTask` | 2 / 300ms | 補償 |
 | `cancel_order` | `cancelOrderTask` | 2 / 300ms | 補償 |
+
+> 📌 **契約更新（Issue #24，修復 TB1 缺口 G1／G2，見 `docs/research/20-tb1-saga-orchestration-inventory.md` §7.2）**：
+> `ship_food` 成功時把 `ShipmentService.createShipment` 回傳的 `driverId` 放進 output，
+> 讓 `notify_driver` 的 `DriverNotificationRequest.driverId` 在 repo 內有生產者（G1；失敗時維持
+> `FAILED` 且不輸出 `driverId`）。`notify_customer` 的輸入由 `Order`（repo 內無人生產、
+> workflow 起始輸入也無此物件）改為最小輸入物件 `pojos/CustomerNotificationRequest`
+> （`orderId`／`customerEmail`／`customerName`，全部可由 workflow 既有資料綁定），並維持
+> placeholder——不實際寄送通知，output 以 `notified=false` 明確標示（G2）。
+> 兩者的契約測試見 `src/test/java/io/orkes/example/saga/workers/ConductorWorkersTest.java`；
+> 九個 task 名稱不變。
 
 > ⚠️ **推論**：task 之間的先後順序與補償觸發條件由 Conductor 上的 workflow 定義決定，**不在本 repo**。
 > 下圖僅依 task 命名慣例與 worker 的狀態語意排列，實際順序須向 Conductor workflow 定義確認（見「待確認問題」）。
@@ -173,9 +185,9 @@ sequenceDiagram
     K-->>S: COMPLETED {paymentId, paymentStatus}
     S->>K: ship_food
     K->>K: ShipmentService.createShipment() → shipments
-    K-->>S: COMPLETED
+    K-->>S: COMPLETED {driverId}（Issue #24 G1）
     S->>K: notify_driver / notify_customer
-    K-->>S: COMPLETED（空輸出）
+    K-->>S: COMPLETED（notify_driver 空輸出；notify_customer {notified=false} placeholder）
 ```
 
 ### 失敗與補償路徑
@@ -187,9 +199,13 @@ sequenceDiagram
   （`workers/ConductorWorkers.java:51-56`）——terminal error 不會重試。
 - `make_payment`：付款狀態非 `SUCCESSFUL` 時回 `FAILED_WITH_TERMINAL_ERROR`
   （`workers/ConductorWorkers.java:71-76`）。
-- `ship_food`：司機指派失敗（`driverId == 0`）時回 `FAILED`（可重試）（`workers/ConductorWorkers.java:88-92`）。
+- `ship_food`：司機指派失敗（`driverId == 0`）時回 `FAILED`（可重試）且**不輸出** `driverId`；成功時
+  回 `COMPLETED` 並把 `createShipment` 回傳的 `driverId` 放進 output（Issue #24 G1，
+  `workers/ConductorWorkers.java:83-99`）。
+- `notify_customer`：placeholder，不實際寄送通知；output 恆為 `notified=false` 以明確標示未寄送
+  （Issue #24 G2，`workers/ConductorWorkers.java:108-121`）。
 - 補償 worker `cancel_payment`／`cancel_delivery`／`cancel_order` 皆回傳空 `Map`，未設定失敗狀態
-  （`workers/ConductorWorkers.java:108-128`）。
+  （`workers/ConductorWorkers.java:123-143`）。
 
 ```mermaid
 flowchart TD
@@ -356,8 +372,9 @@ flowchart LR
    `paymentMethod` 為 `Object`（`pojos/FoodDeliveryRequest.java:13,18`），而 worker 端預期
    `ArrayList<FoodItem>`、`PaymentMethod`（`pojos/CheckInventoryRequest.java:10`、`pojos/PaymentRequest.java:10`），
    兩端型別對齊依賴 Conductor 的序列化行為，無編譯期保證。
-6. **`notify_driver` / `notify_customer` 為空實作**：回傳空 Map，未做任何通知
-   （`workers/ConductorWorkers.java:96-106`）。
+6. **通知步驟不寄送通知**：`notify_driver` 仍為空實作（回傳空 Map）；`notify_customer` 經 Issue #24 G2
+   改為接受 `CustomerNotificationRequest`、並在 output 以 `notified=false` 明確標示 placeholder
+   （不再是靜默空 Map），但兩者仍**未實際寄送任何通知**（`workers/ConductorWorkers.java:101-121`）。
 7. **付款為模擬**：`makePayment()` 僅驗證信用卡到期日後即 `return true`
    （`service/PaymentService.java:60-84`）。
 8. **錯誤處理只印訊息**：多數 DAO 例外出錯僅 `System.out.println`，且未回報呼叫端
@@ -395,7 +412,7 @@ flowchart LR
 | 進入點 | `SagaApplication.java:13-26` | Spring Boot 啟動、初始化 4 組表 |
 | REST 端點 | `controller/OrderServiceController.java:23-26` | `POST /triggerFoodDeliveryFlow` |
 | 啟動 workflow | `service/WorkflowService.java:22-60` | `FoodDeliveryWorkflow` v1、input 組裝、taskToDomain |
-| worker 註冊 | `workers/ConductorWorkers.java:25-128` | 9 個 `@WorkerTask` 與其狀態語意 |
+| worker 註冊 | `workers/ConductorWorkers.java:25-143` | 9 個 `@WorkerTask` 與其狀態語意 |
 | 訂單邏輯 | `service/OrderService.java:21-71` | 建立／讀取／取消訂單，狀態 PENDING/CANCELLED |
 | 庫存邏輯 | `service/InventoryService.java:16-22` | `checkAvailability` 以餐廳名稱是否為空判斷 |
 | 付款邏輯 | `service/PaymentService.java:22-84` | 建立／取消付款、到期日驗證、模擬成功 |
