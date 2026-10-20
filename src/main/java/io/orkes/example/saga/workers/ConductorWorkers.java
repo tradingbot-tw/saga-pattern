@@ -125,6 +125,14 @@ public class ConductorWorkers {
         return result;
     }
 //
+    /**
+     * {@code cancel_payment}：補償步驟，取消該訂單的<strong>全部</strong>付款（Issue #34 / G3）。
+     *
+     * <p>失敗語意依人類裁定（TB1 報告 §9 第 4 題，不採 best-effort）：成功 → {@code COMPLETED}；
+     * 資料庫例外 → {@code FAILED}（可重試，由 Conductor retry policy 接管）；查無可取消的付款 →
+     * {@code FAILED_WITH_TERMINAL_ERROR}（重試不會憑空生出資料）。失敗原因一律寫進
+     * {@code reasonForIncompletion} 讓告警讀得到，補償失敗不會再被吞掉。
+     */
     @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelPaymentTask(CancelRequest cancelRequest) {
         TaskResult result = new TaskResult();
@@ -145,6 +153,13 @@ public class ConductorWorkers {
         return result;
     }
 
+    /**
+     * {@code cancel_delivery}：補償步驟，取消該訂單的外送單（Issue #34 / G3）。
+     *
+     * <p>狀態語意同 {@link #cancelPaymentTask}：成功 {@code COMPLETED}、資料庫例外
+     * {@code FAILED}（可重試）、查無可取消的外送單 {@code FAILED_WITH_TERMINAL_ERROR}，
+     * 失敗原因寫進 {@code reasonForIncompletion}。
+     */
     @WorkerTask(value = "cancel_delivery", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelDeliveryTask(CancelRequest cancelRequest) {
         TaskResult result = new TaskResult();
@@ -165,6 +180,14 @@ public class ConductorWorkers {
         return result;
     }
 
+    /**
+     * {@code cancel_order}：補償步驟，把訂單轉為 CANCELLED（Issue #34 / G3）。
+     *
+     * <p>不存在的 {@code orderId} 不得回報成功：查無訂單（或更新 0 列）回
+     * {@code FAILED_WITH_TERMINAL_ERROR}；資料庫例外回 {@code FAILED}（可重試）；
+     * 成功才回 {@code COMPLETED}。「資料庫讀取失敗不等於訂單不存在」——兩者由
+     * {@code DaoWriteException} 與查無列區分，不得混為一談。
+     */
     @WorkerTask(value = "cancel_order", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelOrderTask(CancelRequest cancelRequest) {
         TaskResult result = new TaskResult();

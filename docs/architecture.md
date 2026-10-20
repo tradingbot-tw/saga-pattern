@@ -198,8 +198,11 @@ sequenceDiagram
   （`workers/ConductorWorkers.java:71-76`）。
 - `ship_food`：司機指派失敗（`driverId == 0`）時回 `FAILED`（可重試）；成功時 output 帶
   `driverId`（`workers/ConductorWorkers.java:83-103`）。
-- 補償 worker `cancel_payment`／`cancel_delivery`／`cancel_order` 皆回傳空 `Map`，未設定失敗狀態
-  （`workers/ConductorWorkers.java:108-128`）。
+- 補償 worker `cancel_payment`／`cancel_delivery`／`cancel_order`（Issue #34 / G3 修復後）回傳
+  `TaskResult` 並如實回報結果：成功 → `COMPLETED`；資料庫例外（DAO 抛出 `DaoWriteException`）→
+  `FAILED`（可重試）；目標不存在（更新受影響列數為 0、查無訂單）→ `FAILED_WITH_TERMINAL_ERROR`；
+  失敗原因一律寫進 `reasonForIncompletion`。`cancel_payment` 以
+  `PaymentsDAO.cancelPaymentsByOrderId` 批次更新，同一 `orderId` 的多筆付款全部取消。
 
 ```mermaid
 flowchart TD
