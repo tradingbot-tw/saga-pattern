@@ -5,6 +5,7 @@ import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.CancelRequest;
 import io.orkes.example.saga.pojos.CheckInventoryRequest;
+import io.orkes.example.saga.pojos.CustomerNotificationRequest;
 import io.orkes.example.saga.pojos.DriverNotificationRequest;
 import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
@@ -17,9 +18,11 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -27,6 +30,7 @@ import java.util.Arrays;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -175,17 +179,64 @@ class ConductorWorkersTest {
         assertEquals("Expired payment method:01/2020", result.getOutputData().get("error"));
     }
 
+    /** 一筆可成功指派司機的外送請求。 */
+    private static ShippingRequest shippingRequest(String orderId) {
+        ShippingRequest request = new ShippingRequest();
+        request.setOrderId(orderId);
+        request.setDeliveryAddress("1693 Alice Court, Annapolis MD 21401");
+        request.setDeliveryInstructions("放門口");
+        return request;
+    }
+
     @Test
     @DisplayName("重試語義：ship_food 寫外送單失敗時回傳 FAILED（司機指派可再嘗試）")
     void shipFoodFailsRetryablyWhenShipmentInsertIsRejected() {
-        ShippingRequest request = new ShippingRequest();
-        request.setOrderId(SagaTestDb.uniqueId("order"));
+        ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
         request.setDeliveryAddress(null);
-        request.setDeliveryInstructions("放門口");
 
         TaskResult result = workers.shipFoodTask(request);
 
         assertEquals(TaskResult.Status.FAILED, result.getStatus());
+        assertFalse(result.getOutputData().containsKey("driverId"),
+                "失敗時不得輸出 driverId，避免下游把未指派的司機當成有效值");
+    }
+
+    @Test
+    @Disabled("Issue #24 G1：修復前 ship_food 從不設定 output；02-impl 修正後啟用")
+    @DisplayName("契約：ship_food 成功時把 createShipment 指派的 driverId 放進 output")
+    void shipFoodPublishesDriverIdOnSuccess() throws Exception {
+        ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
+
+        TaskResult result = workers.shipFoodTask(request);
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+        Object driverId = result.getOutputData().get("driverId");
+        assertNotNull(driverId, "ship_food 成功時必須輸出 driverId 供 notify_driver 綁定");
+        assertEquals(
+                SagaTestDb.queryString(URL,
+                        "SELECT driverId FROM shipments WHERE orderId = '" + request.getOrderId() + "'"),
+                String.valueOf(driverId),
+                "output 的 driverId 必須是 createShipment 實際指派並持久化的司機");
+    }
+
+    @Test
+    @Disabled("Issue #24 G1：修復前 ship_food 沒有 output.driverId，notify_driver 無法綁定")
+    @DisplayName("契約：notify_driver 可直接綁定 ship_food 輸出的 driverId")
+    void shipFoodOutputFeedsDriverNotification() {
+        ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
+
+        TaskResult shipResult = workers.shipFoodTask(request);
+        assertEquals(TaskResult.Status.COMPLETED, shipResult.getStatus());
+        Object driverId = shipResult.getOutputData().get("driverId");
+        assertNotNull(driverId, "notify_driver 的 driverId 必須有生產者");
+
+        DriverNotificationRequest notification = new DriverNotificationRequest();
+        notification.setDriverId((Integer) driverId);
+        notification.setOrderId(request.getOrderId());
+        notification.setDropOff(request.getDeliveryAddress());
+        notification.setPickUp("restaurant");
+
+        assertNotNull(workers.checkForDriverNotifications(notification));
     }
 
     @Test
@@ -232,6 +283,26 @@ class ConductorWorkersTest {
 
         assertEquals("CANCELED", SagaTestDb.queryString(URL,
                 "SELECT status FROM shipments WHERE orderId = '" + orderId + "'"));
+    }
+
+    @Test
+    @Disabled("Issue #24 G2：修復前 notify_customer 只接受 Order；02-impl 改為 CustomerNotificationRequest 後啟用")
+    @DisplayName("契約：notify_customer 接受 workflow 起始輸入可提供的最小物件，並標示未寄送")
+    void notifyCustomerAcceptsMinimalCustomerInput() throws Exception {
+        CustomerNotificationRequest request = new CustomerNotificationRequest();
+        request.setOrderId(SagaTestDb.uniqueId("order"));
+        request.setCustomerEmail("buyer@example.com");
+        request.setCustomerName("測試買家");
+
+        Method notifyCustomer = ConductorWorkers.class
+                .getMethod("checkForCustomerNotifications", CustomerNotificationRequest.class);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> output =
+                (Map<String, Object>) notifyCustomer.invoke(workers, request);
+
+        assertEquals(Boolean.FALSE, output.get("notified"),
+                "notify_customer 是 placeholder，output 必須明確標示未寄送");
+        assertEquals(request.getOrderId(), output.get("orderId"));
     }
 
     @Test
