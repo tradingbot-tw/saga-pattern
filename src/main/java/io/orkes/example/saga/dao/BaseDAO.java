@@ -11,13 +11,11 @@ public class BaseDAO {
     }
 
     protected Connection connect() {
-        Connection conn = null;
         try {
-            conn = DriverManager.getConnection(this.url);
+            return DriverManager.getConnection(this.url);
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DaoWriteException("Failed to connect to database " + this.url, e);
         }
-        return conn;
     }
 
     protected Boolean execute(String sql) {

@@ -2,6 +2,7 @@ package io.orkes.example.saga.workers;
 
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import com.netflix.conductor.sdk.workflow.task.WorkerTask;
+import io.orkes.example.saga.dao.DaoWriteException;
 import io.orkes.example.saga.pojos.*;
 import io.orkes.example.saga.service.InventoryService;
 import io.orkes.example.saga.service.OrderService;
@@ -127,25 +128,66 @@ public class ConductorWorkers {
     @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelPaymentTask(CancelRequest cancelRequest) {
         TaskResult result = new TaskResult();
-        PaymentService.cancelPayment(cancelRequest.getOrderId());
-        result.setStatus(TaskResult.Status.COMPLETED);
+        String orderId = cancelRequest.getOrderId();
+        try {
+            int cancelledPayments = PaymentService.cancelPayment(orderId);
+            if (cancelledPayments > 0) {
+                result.setStatus(TaskResult.Status.COMPLETED);
+            } else {
+                result.setReasonForIncompletion("No payment to cancel for order " + orderId);
+                result.setStatus(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR);
+            }
+        } catch (DaoWriteException e) {
+            result.setReasonForIncompletion("Database error while cancelling payment for order "
+                    + orderId + ": " + e.getMessage());
+            result.setStatus(TaskResult.Status.FAILED);
+        }
         return result;
     }
 
     @WorkerTask(value = "cancel_delivery", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelDeliveryTask(CancelRequest cancelRequest) {
         TaskResult result = new TaskResult();
-        ShipmentService.cancelDelivery(cancelRequest.getOrderId());
-        result.setStatus(TaskResult.Status.COMPLETED);
+        String orderId = cancelRequest.getOrderId();
+        try {
+            int cancelledShipments = ShipmentService.cancelDelivery(orderId);
+            if (cancelledShipments > 0) {
+                result.setStatus(TaskResult.Status.COMPLETED);
+            } else {
+                result.setReasonForIncompletion("No delivery to cancel for order " + orderId);
+                result.setStatus(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR);
+            }
+        } catch (DaoWriteException e) {
+            result.setReasonForIncompletion("Database error while cancelling delivery for order "
+                    + orderId + ": " + e.getMessage());
+            result.setStatus(TaskResult.Status.FAILED);
+        }
         return result;
     }
 
     @WorkerTask(value = "cancel_order", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelOrderTask(CancelRequest cancelRequest) {
         TaskResult result = new TaskResult();
-        Order order = OrderService.getOrder(cancelRequest.getOrderId());
-        OrderService.cancelOrder(order);
-        result.setStatus(TaskResult.Status.COMPLETED);
+        String orderId = cancelRequest.getOrderId();
+        try {
+            Order order = OrderService.getOrder(orderId);
+            if (order.getOrderId() == null) {
+                result.setReasonForIncompletion("Order " + orderId + " does not exist");
+                result.setStatus(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR);
+            } else {
+                int cancelled = OrderService.cancelOrder(order);
+                if (cancelled > 0) {
+                    result.setStatus(TaskResult.Status.COMPLETED);
+                } else {
+                    result.setReasonForIncompletion("Order " + orderId + " no longer exists to cancel");
+                    result.setStatus(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR);
+                }
+            }
+        } catch (DaoWriteException e) {
+            result.setReasonForIncompletion("Database error while cancelling order "
+                    + orderId + ": " + e.getMessage());
+            result.setStatus(TaskResult.Status.FAILED);
+        }
         return result;
     }
 

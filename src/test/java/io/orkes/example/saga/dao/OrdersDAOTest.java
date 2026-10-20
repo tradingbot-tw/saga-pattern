@@ -7,7 +7,6 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -175,7 +174,6 @@ class OrdersDAOTest {
 
     @Test
     @DisplayName("失敗語意（Issue #34）：updateOrder 遭遇資料庫例外時拋出 DaoWriteException，不再吞掉")
-    @Disabled("Issue #34 紅燈測試：SQLException 尚未轉為可辨識例外，於 02-impl un-skip")
     void updateOrderPropagatesDatabaseFailure() throws Exception {
         String brokenUrl = SagaTestDb.tempUrl("broken-orders");
         try {

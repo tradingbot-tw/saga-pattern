@@ -40,8 +40,7 @@ public class ShipmentDAO extends BaseDAO {
             pstmt.setString(2, orderId);
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DaoWriteException("Failed to cancel shipment for order " + orderId, e);
         }
     }
 

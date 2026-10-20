@@ -69,8 +69,7 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(4, order.getOrderId());
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DaoWriteException("Failed to update order " + order.getOrderId(), e);
         }
     }
 
@@ -92,7 +91,7 @@ public class OrdersDAO extends BaseDAO {
             }
 
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DaoWriteException("Failed to read order " + orderId, e);
         }
     }
 

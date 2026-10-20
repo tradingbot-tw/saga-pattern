@@ -49,12 +49,13 @@ public class PaymentService {
         return payment;
     }
 
+    /**
+     * 取消該訂單的<strong>全部</strong>付款（Issue #34），回傳實際取消的筆數：
+     * 0 = 查無可取消的付款（終端錯誤），資料庫例外則由 DAO 抛出
+     * {@code DaoWriteException}（可重試的失敗）。
+     */
     public static int cancelPayment(String orderId) {
-        // Cancel Payment in DB
-        Payment payment = new Payment();
-        paymentsDAO.readPayment(orderId, payment);
-        payment.setStatus(Payment.Status.CANCELED);
-        return paymentsDAO.updatePaymentStatus(payment);
+        return paymentsDAO.cancelPaymentsByOrderId(orderId);
     }
 
     private static boolean makePayment(Payment payment) {

@@ -297,11 +297,11 @@ class ConductorWorkersTest {
      * 目標不存在 → {@code FAILED_WITH_TERMINAL_ERROR}；失敗原因寫進 {@code reasonForIncompletion}。
      *
      * <p>以下測試重現既有缺陷（回傳 Map 一律 COMPLETED、DAO 吞掉 SQLException），
-     * 在修復（02-impl）前為紅燈，故以 {@code @Disabled} 交付，讓 01-test 層單獨 CI 綠燈。
+     * 在修復（02-impl）前為紅燈，於 01-test 層以 {@code @Disabled} 交付（該層單獨 CI 綠燈），
+     * 本層修復完成後 un-skip，於本層 CI 驗證綠燈。
      */
     @Test
     @DisplayName("失敗語意：cancel_order 對不存在的 orderId 不得回報成功，應回終端錯誤並給原因")
-    @Disabled("Issue #34 紅燈測試：cancel_* 尚未回傳 TaskResult 失敗語意，於 02-impl un-skip")
     void cancelOrderFailsTerminallyForUnknownOrderId() {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(SagaTestDb.uniqueId("ghost-order"));
@@ -317,7 +317,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("失敗語意：cancel_payment 查無可取消的付款時應回終端錯誤並給原因")
-    @Disabled("Issue #34 紅燈測試：cancel_* 尚未回傳 TaskResult 失敗語意，於 02-impl un-skip")
     void cancelPaymentFailsTerminallyWhenNoPaymentExists() {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(SagaTestDb.uniqueId("ghost-order"));
@@ -333,7 +332,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("失敗語意：cancel_delivery 查無可取消的外送單時應回終端錯誤並給原因")
-    @Disabled("Issue #34 紅燈測試：cancel_* 尚未回傳 TaskResult 失敗語意，於 02-impl un-skip")
     void cancelDeliveryFailsTerminallyWhenNoShipmentExists() {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(SagaTestDb.uniqueId("ghost-order"));
@@ -349,7 +347,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("失敗語意：cancel_payment 遭遇資料庫例外時回 FAILED（可重試）並帶原因")
-    @Disabled("Issue #34 紅燈測試：資料庫例外尚未轉為可重試的 FAILED，於 02-impl un-skip")
     void cancelPaymentFailsRetryablyOnDatabaseError() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
@@ -366,7 +363,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("失敗語意：cancel_delivery 遭遇資料庫例外時回 FAILED（可重試）並帶原因")
-    @Disabled("Issue #34 紅燈測試：資料庫例外尚未轉為可重試的 FAILED，於 02-impl un-skip")
     void cancelDeliveryFailsRetryablyOnDatabaseError() throws Exception {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(SagaTestDb.uniqueId("order"));
@@ -380,7 +376,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("失敗語意：cancel_order 遭遇資料庫例外時回 FAILED（可重試）而非查無訂單的終端錯誤")
-    @Disabled("Issue #34 紅燈測試：資料庫例外尚未轉為可重試的 FAILED，於 02-impl un-skip")
     void cancelOrderFailsRetryablyOnDatabaseError() throws Exception {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(SagaTestDb.uniqueId("order"));
@@ -394,7 +389,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("多筆付款：cancel_payment 對同一 orderId 的多筆付款要全部取消")
-    @Disabled("Issue #34 紅燈測試：cancel_payment 只取消讀到的那一筆，於 02-impl un-skip")
     void cancelPaymentCancelsEveryPaymentOfTheOrder() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         PaymentsDAO paymentsDAO = new PaymentsDAO(URL);

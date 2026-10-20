@@ -5,7 +5,6 @@ import io.orkes.example.saga.pojos.Driver;
 import io.orkes.example.saga.pojos.Shipment;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -139,7 +138,6 @@ class ShipmentDAOTest {
 
     @Test
     @DisplayName("失敗語意（Issue #34）：cancelShipment 遭遇資料庫例外時拋出 DaoWriteException，不再吞掉")
-    @Disabled("Issue #34 紅燈測試：SQLException 尚未轉為可辨識例外，於 02-impl un-skip")
     void cancelShipmentPropagatesDatabaseFailure() throws Exception {
         String brokenUrl = SagaTestDb.tempUrl("broken-shipments");
         try {

@@ -40,8 +40,23 @@ public class PaymentsDAO extends BaseDAO {
             pstmt.setString(2, payment.getPaymentId());
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DaoWriteException("Failed to update payment " + payment.getPaymentId(), e);
+        }
+    }
+
+    /**
+     * 取消某訂單的<strong>全部</strong>付款（Issue #34：同一 orderId 可能有多筆付款，
+     * 補償要能全數取消），回傳受影響列數；0 代表查無可取消的付款。
+     */
+    public int cancelPaymentsByOrderId(String orderId) {
+        String sql = "UPDATE payments SET status=? WHERE orderId=?;";
+
+        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, Payment.Status.CANCELED.name());
+            pstmt.setString(2, orderId);
+            return pstmt.executeUpdate();
+        } catch (SQLException e) {
+            throw new DaoWriteException("Failed to cancel payments for order " + orderId, e);
         }
     }
 
