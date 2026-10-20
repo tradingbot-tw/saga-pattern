@@ -80,12 +80,21 @@ public class ConductorWorkers {
         return result;
     }
 
+    /**
+     * {@code ship_food}：指派司機並建立外送單（Issue #24 / G1）。
+     *
+     * <p>成功時 output 帶 {@code driverId}，讓下游 {@code notify_driver} 的
+     * {@link DriverNotificationRequest#getDriverId()} 有生產者；失敗時不輸出
+     * {@code driverId}，狀態維持 {@code FAILED} 由 Conductor retry policy 接管。
+     */
     @WorkerTask(value = "ship_food", threadCount = 2, pollingInterval = 300)
     public TaskResult shipFoodTask(ShippingRequest shippingRequest) {
         TaskResult result = new TaskResult();
         Map<String, Object> output = new HashMap<>();
         int driverId = ShipmentService.createShipment(shippingRequest);
         if (driverId != 0) {
+            output.put("driverId", driverId);
+            result.setOutputData(output);
             result.setStatus(TaskResult.Status.COMPLETED);
         } else {
             result.setStatus(TaskResult.Status.FAILED);
@@ -99,9 +108,19 @@ public class ConductorWorkers {
         return result;
     }
 
+    /**
+     * {@code notify_customer} 的 placeholder（Issue #24 / G2）。
+     *
+     * <p>輸入只要求 workflow 起始輸入實際提供的欄位（{@code orderId}、{@code customerEmail}、
+     * {@code customerName}），不再需要 repo 內沒有生產者的完整 {@link Order}。本步驟
+     * <strong>不實際寄送通知</strong>，output 以 {@code notified=false} 明確標示，避免
+     * workflow 定義誤以為已通知。
+     */
     @WorkerTask(value = "notify_customer", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> checkForCustomerNotifications(Order order) {
+    public Map<String, Object> checkForCustomerNotifications(CustomerNotificationRequest request) {
         Map<String, Object> result = new HashMap<>();
+        result.put("orderId", request.getOrderId());
+        result.put("notified", false);
         return result;
     }
 //
