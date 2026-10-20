@@ -18,11 +18,9 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Method;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -202,7 +200,6 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @Disabled("Issue #24 G1：修復前 ship_food 從不設定 output；02-impl 修正後啟用")
     @DisplayName("契約：ship_food 成功時把 createShipment 指派的 driverId 放進 output")
     void shipFoodPublishesDriverIdOnSuccess() throws Exception {
         ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
@@ -220,7 +217,6 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @Disabled("Issue #24 G1：修復前 ship_food 沒有 output.driverId，notify_driver 無法綁定")
     @DisplayName("契約：notify_driver 可直接綁定 ship_food 輸出的 driverId")
     void shipFoodOutputFeedsDriverNotification() {
         ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
@@ -286,19 +282,14 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @Disabled("Issue #24 G2：修復前 notify_customer 只接受 Order；02-impl 改為 CustomerNotificationRequest 後啟用")
     @DisplayName("契約：notify_customer 接受 workflow 起始輸入可提供的最小物件，並標示未寄送")
-    void notifyCustomerAcceptsMinimalCustomerInput() throws Exception {
+    void notifyCustomerAcceptsMinimalCustomerInput() {
         CustomerNotificationRequest request = new CustomerNotificationRequest();
         request.setOrderId(SagaTestDb.uniqueId("order"));
         request.setCustomerEmail("buyer@example.com");
         request.setCustomerName("測試買家");
 
-        Method notifyCustomer = ConductorWorkers.class
-                .getMethod("checkForCustomerNotifications", CustomerNotificationRequest.class);
-        @SuppressWarnings("unchecked")
-        Map<String, Object> output =
-                (Map<String, Object>) notifyCustomer.invoke(workers, request);
+        Map<String, Object> output = workers.checkForCustomerNotifications(request);
 
         assertEquals(Boolean.FALSE, output.get("notified"),
                 "notify_customer 是 placeholder，output 必須明確標示未寄送");
@@ -306,9 +297,16 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @DisplayName("通知步驟目前是不帶輸出的佔實作（notify_driver／notify_customer）")
+    @DisplayName("通知步驟不實際寄送：notify_driver 無輸出，notify_customer 標示 notified=false")
     void notificationStepsArePlaceholders() {
         assertTrue(workers.checkForDriverNotifications(new DriverNotificationRequest()).isEmpty());
-        assertTrue(workers.checkForCustomerNotifications(new Order()).isEmpty());
+
+        CustomerNotificationRequest request = new CustomerNotificationRequest();
+        request.setOrderId(SagaTestDb.uniqueId("order"));
+        request.setCustomerEmail("buyer@example.com");
+        request.setCustomerName("測試買家");
+        Map<String, Object> output = workers.checkForCustomerNotifications(request);
+        assertEquals(Boolean.FALSE, output.get("notified"));
+        assertEquals(request.getOrderId(), output.get("orderId"));
     }
 }
