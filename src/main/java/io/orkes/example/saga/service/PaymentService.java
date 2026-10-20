@@ -56,11 +56,8 @@ public class PaymentService {
      * {@link io.orkes.example.saga.dao.DataAccessException}，由 worker 轉成 task 失敗。
      */
     public static int cancelPayment(String orderId) {
-        // Cancel Payment in DB
-        Payment payment = new Payment();
-        paymentsDAO.readPayment(orderId, payment);
-        payment.setStatus(Payment.Status.CANCELED);
-        return paymentsDAO.updatePaymentStatus(payment);
+        // 同一 orderId 可能有多筆付款（重試或多次付款），必須一次全部取消。
+        return paymentsDAO.cancelPaymentsByOrderId(orderId);
     }
 
     private static boolean makePayment(Payment payment) {

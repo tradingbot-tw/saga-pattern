@@ -10,14 +10,19 @@ public class BaseDAO {
         this.url = url;
     }
 
+    /**
+     * 取得資料庫連線；失敗時丟出可辨識的 {@link DataAccessException}（Issue #34）。
+     *
+     * <p>原本回傳 {@code null} 並只印訊息，呼叫端會在 {@code conn.prepareStatement}
+     * 收到難以辨識的 {@link NullPointerException}，worker 無法區分「資料庫不可用」
+     * 與「目標不存在」。
+     */
     protected Connection connect() {
-        Connection conn = null;
         try {
-            conn = DriverManager.getConnection(this.url);
+            return DriverManager.getConnection(this.url);
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException("Failed to connect to database: " + this.url, e);
         }
-        return conn;
     }
 
     protected Boolean execute(String sql) {

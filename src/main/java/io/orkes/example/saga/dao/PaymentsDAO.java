@@ -45,8 +45,7 @@ public class PaymentsDAO extends BaseDAO {
             pstmt.setString(2, payment.getPaymentId());
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DataAccessException("Failed to update payment " + payment.getPaymentId(), e);
         }
     }
 
@@ -62,8 +61,7 @@ public class PaymentsDAO extends BaseDAO {
             pstmt.setString(2, orderId);
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DataAccessException("Failed to cancel payments for order " + orderId, e);
         }
     }
 

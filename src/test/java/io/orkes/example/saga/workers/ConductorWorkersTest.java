@@ -18,7 +18,6 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -254,7 +253,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償失敗（terminal）：cancel_order 查無訂單時不得回報成功")
-    @Disabled("Issue #34 紅燈測試：02-impl 讓 cancel_order 對不存在的 orderId 回 FAILED_WITH_TERMINAL_ERROR")
     void cancelOrderFailsTerminallyWhenOrderDoesNotExist() {
         String missingOrderId = SagaTestDb.uniqueId("missing-order");
         CancelRequest cancelRequest = new CancelRequest();
@@ -286,7 +284,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償失敗（terminal）：cancel_payment 查無付款時必須回 FAILED_WITH_TERMINAL_ERROR")
-    @Disabled("Issue #34 紅燈測試：02-impl 讓 cancel_payment 對查無付款回 terminal error")
     void cancelPaymentFailsTerminallyWhenNoPaymentExists() {
         String missingOrderId = SagaTestDb.uniqueId("missing-payment");
         CancelRequest cancelRequest = new CancelRequest();
@@ -302,7 +299,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償（多重付款）：cancel_payment 取消同一 orderId 的所有付款")
-    @Disabled("Issue #34 紅燈測試：現行 readPayment 只留最後一筆，02-impl 改為整批取消")
     void cancelPaymentCancelsEveryPaymentForOrder() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
@@ -324,7 +320,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償失敗（可重試）：cancel_payment 遇資料庫寫入失敗時回 FAILED 並帶原因")
-    @Disabled("Issue #34 紅燈測試：02-impl 不再吞掉 SQLException，讓 worker 回 FAILED")
     void cancelPaymentFailsRetryablyWhenDatabaseWriteFails() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
@@ -371,7 +366,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償失敗（terminal）：cancel_delivery 查無外送單時必須回 FAILED_WITH_TERMINAL_ERROR")
-    @Disabled("Issue #34 紅燈測試：02-impl 讓 cancel_delivery 對查無外送單回 terminal error")
     void cancelDeliveryFailsTerminallyWhenNoShipmentExists() {
         String missingOrderId = SagaTestDb.uniqueId("missing-shipment");
         CancelRequest cancelRequest = new CancelRequest();
@@ -387,7 +381,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償失敗（可重試）：cancel_delivery 遇資料庫寫入失敗時回 FAILED 並帶原因")
-    @Disabled("Issue #34 紅燈測試：02-impl 不再吞掉 SQLException，讓 worker 回 FAILED")
     void cancelDeliveryFailsRetryablyWhenDatabaseWriteFails() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         Shipment shipment = new Shipment();
@@ -418,7 +411,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("補償失敗（可重試）：cancel_order 遇資料庫寫入失敗時回 FAILED 並帶原因")
-    @Disabled("Issue #34 紅燈測試：02-impl 不再吞掉 SQLException，讓 worker 回 FAILED")
     void cancelOrderFailsRetryablyWhenDatabaseWriteFails() throws Exception {
         String orderId = String.valueOf(workers.orderFoodTask(orderRequest()).getOutputData().get("orderId"));
         CancelRequest cancelRequest = new CancelRequest();

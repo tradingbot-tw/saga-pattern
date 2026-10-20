@@ -11,6 +11,8 @@ package io.orkes.example.saga.dao;
 public class DataAccessException extends RuntimeException {
 
     public DataAccessException(String message, Throwable cause) {
-        super(message, cause);
+        super(cause == null || cause.getMessage() == null
+                ? message
+                : message + ": " + cause.getMessage(), cause);
     }
 }

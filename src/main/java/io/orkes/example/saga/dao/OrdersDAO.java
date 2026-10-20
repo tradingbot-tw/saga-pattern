@@ -75,8 +75,7 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(4, order.getOrderId());
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DataAccessException("Failed to update order " + order.getOrderId(), e);
         }
     }
 
@@ -94,8 +93,7 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(2, orderId);
             return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return 0;
+            throw new DataAccessException("Failed to cancel order " + orderId, e);
         }
     }
 
