@@ -125,24 +125,26 @@ public class ConductorWorkers {
     }
 //
     @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> cancelPaymentTask(CancelRequest cancelRequest) {
-        Map<String, Object> result = new HashMap<>();
+    public TaskResult cancelPaymentTask(CancelRequest cancelRequest) {
+        TaskResult result = new TaskResult();
         PaymentService.cancelPayment(cancelRequest.getOrderId());
+        result.setStatus(TaskResult.Status.COMPLETED);
         return result;
     }
 
     @WorkerTask(value = "cancel_delivery", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> cancelDeliveryTask(CancelRequest cancelRequest) {
-        Map<String, Object> result = new HashMap<>();
+    public TaskResult cancelDeliveryTask(CancelRequest cancelRequest) {
+        TaskResult result = new TaskResult();
         ShipmentService.cancelDelivery(cancelRequest.getOrderId());
+        result.setStatus(TaskResult.Status.COMPLETED);
         return result;
     }
 
     @WorkerTask(value = "cancel_order", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> cancelOrderTask(CancelRequest cancelRequest) {
-        Map<String, Object> result = new HashMap<>();
-        Order order = OrderService.getOrder(cancelRequest.getOrderId());
-        OrderService.cancelOrder(order);
+    public TaskResult cancelOrderTask(CancelRequest cancelRequest) {
+        TaskResult result = new TaskResult();
+        OrderService.cancelOrder(cancelRequest.getOrderId());
+        result.setStatus(TaskResult.Status.COMPLETED);
         return result;
     }
 

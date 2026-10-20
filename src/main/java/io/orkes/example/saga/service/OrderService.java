@@ -64,9 +64,14 @@ public class OrderService {
         return order;
     }
 
-    public static void cancelOrder(Order order) {
-        order.setStatus(Order.Status.CANCELLED);
-        log.info("Cancelling order {}", order.getOrderId());
-        ORDERS_DAO.updateOrder(order);
+    /**
+     * 取消訂單，回傳受影響的列數（Issue #34）。
+     *
+     * <p>查無 {@code orderId} 時回傳 {@code 0}；資料庫失敗時丟出
+     * {@link io.orkes.example.saga.dao.DataAccessException}，由 worker 轉成 task 失敗。
+     */
+    public static int cancelOrder(String orderId) {
+        log.info("Cancelling order {}", orderId);
+        return ORDERS_DAO.cancelOrder(orderId);
     }
 }

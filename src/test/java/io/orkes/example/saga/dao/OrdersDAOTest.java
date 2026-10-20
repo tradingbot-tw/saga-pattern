@@ -99,11 +99,40 @@ class OrdersDAOTest {
         dao.insertOrder(order);
 
         order.setStatus(Order.Status.CANCELLED);
-        dao.updateOrder(order);
+        assertEquals(1, dao.updateOrder(order), "更新既有訂單應回傳受影響的 1 列");
 
         Order read = new Order();
         dao.readOrder(orderId, read);
         assertEquals(Order.Status.CANCELLED, read.getStatus());
+    }
+
+    @Test
+    @DisplayName("步驟失敗訊號：更新不存在的訂單回傳 0（cancel_order 據此回 terminal error）")
+    void updateUnknownOrderReturnsZero() {
+        Order missing = pendingOrder(SagaTestDb.uniqueId("missing-order"));
+
+        assertEquals(0, dao.updateOrder(missing),
+                "UPDATE 沒有命中任何列時必須回傳 0，不能 silent no-op");
+    }
+
+    @Test
+    @DisplayName("補償 primitive：cancelOrder 只改 status，查無訂單時回傳 0")
+    void cancelOrderOnlyUpdatesStatusAndReportsMissingRow() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        Order order = pendingOrder(orderId);
+        dao.insertOrder(order);
+
+        assertEquals(1, dao.cancelOrder(orderId));
+
+        Order read = new Order();
+        dao.readOrder(orderId, read);
+        assertEquals(Order.Status.CANCELLED, read.getStatus());
+        assertEquals(1, read.getRestaurantId(), "補償不得把 restaurantId 覆寫成 0");
+        assertEquals(order.getDeliveryAddress(), read.getDeliveryAddress(),
+                "補償不得把 deliveryAddress 覆寫成 null");
+
+        assertEquals(0, dao.cancelOrder(SagaTestDb.uniqueId("missing-order")),
+                "查無 orderId 時必須回傳 0，讓 worker 回報 terminal error");
     }
 
     @Test

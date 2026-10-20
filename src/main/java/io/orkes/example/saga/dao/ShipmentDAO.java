@@ -32,15 +32,21 @@ public class ShipmentDAO extends BaseDAO {
         }
         return true;
     }
-    public void cancelShipment(String orderId) {
+    /**
+     * 取消外送單，回傳受影響的列數（Issue #34：不再 silent no-op）。
+     *
+     * <p>回傳 {@code 0} 代表該 {@code orderId} 沒有可取消的外送單。
+     */
+    public int cancelShipment(String orderId) {
         String sql = "UPDATE shipments SET status=? WHERE orderId=?;";
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setString(1, Shipment.Status.CANCELED.name());
             pstmt.setString(2, orderId);
-            pstmt.executeUpdate();
+            return pstmt.executeUpdate();
         } catch (SQLException e) {
             System.out.println(e.getMessage());
+            return 0;
         }
     }
 

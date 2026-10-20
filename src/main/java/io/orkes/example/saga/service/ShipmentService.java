@@ -46,8 +46,14 @@ public class ShipmentService {
         return driverId;
     }
 
-    public static void cancelDelivery(String orderId) {
-        shipmentDAO.cancelShipment(orderId);
+    /**
+     * 取消指定訂單的外送單，回傳受影響的列數（Issue #34）。
+     *
+     * <p>查無外送單時回傳 {@code 0}；資料庫失敗時丟出
+     * {@link io.orkes.example.saga.dao.DataAccessException}，由 worker 轉成 task 失敗。
+     */
+    public static int cancelDelivery(String orderId) {
+        return shipmentDAO.cancelShipment(orderId);
     }
 
     private static int findDriver() {
