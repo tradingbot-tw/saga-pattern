@@ -193,7 +193,6 @@ class ConductorWorkersTest {
 
     @Test
     @DisplayName("契約 G1：ship_food 成功時 output 帶出 driverId，且等於 createShipment 的回傳值")
-    @Disabled("修復前紅燈（01-test 層）：shipFoodTask 從未 setOutputData，output 不含 driverId。02-impl 修復後啟用——Issue #24 G1")
     void shipFoodPublishesDriverIdOnSuccess() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         ShippingRequest request = new ShippingRequest();
@@ -282,17 +281,18 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @DisplayName("通知步驟目前是不帶輸出的佔實作（notify_driver／notify_customer）")
+    @DisplayName("通知步驟的佔實作語意：notify_driver 無輸出；notify_customer 標示未寄送")
     void notificationStepsArePlaceholders() {
         assertTrue(workers.checkForDriverNotifications(new DriverNotificationRequest()).isEmpty());
-        // Issue #24 G2：notify_customer 的輸入由 Order 改為工作流實際能提供的最小輸入物件；
-        // 本斷言只驗證「尚未寄送＝無輸出」的佔實作語意，占位輸出欄位（notified=false）由下方契约測試驗證。
-        assertTrue(workers.checkForCustomerNotifications(new CustomerNotificationRequest()).isEmpty());
+        // Issue #24 G2 變更此斷言（#9 鎖的是舊契約「靜默空 map」；#24 要求 placeholder
+        // 必須在 output 明確標示未寄送，舊斷言若保留會直接抵觸新契約）：
+        // notify_customer 不實際寄送，故 notified 恆為 false。
+        assertFalse((Boolean) workers.checkForCustomerNotifications(new CustomerNotificationRequest()).get("notified"),
+                "notify_customer 不得自稱已寄送通知");
     }
 
     @Test
     @DisplayName("契約 G2：notify_customer 接受最小輸入物件並成功回傳，output 明確標示未寄送（notified=false）")
-    @Disabled("修復前紅燈（01-test 層）：placeholder 回傳空 map，output 沒有 notified 標示。02-impl 修復後啟用——Issue #24 G2")
     void notifyCustomerAcceptsMinimalInputAndMarksNotNotified() {
         CustomerNotificationRequest request = new CustomerNotificationRequest();
         request.setOrderId(SagaTestDb.uniqueId("order"));

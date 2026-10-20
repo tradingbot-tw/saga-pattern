@@ -86,6 +86,11 @@ public class ConductorWorkers {
         Map<String, Object> output = new HashMap<>();
         int driverId = ShipmentService.createShipment(shippingRequest);
         if (driverId != 0) {
+            // Issue #24 G1：把指派到的 driverId 放進 output，讓 notify_driver 的
+            // DriverNotificationRequest.driverId 在 repo 內有生產者；失敗時維持
+            // FAILED 且不輸出 driverId（無效指派不得餵給通知步驟）。
+            output.put("driverId", driverId);
+            result.setOutputData(output);
             result.setStatus(TaskResult.Status.COMPLETED);
         } else {
             result.setStatus(TaskResult.Status.FAILED);
@@ -99,11 +104,19 @@ public class ConductorWorkers {
         return result;
     }
 
-    // 簽名先行（Issue #24 G2 的測試基礎設施）：輸入型別由 Order 換成最小輸入物件，
-    // 行為暫維持有空輸出——placeholder 語意（notified=false）由 02-impl 層實作。
+    /**
+     * notify_customer：placeholder——<b>不實際寄送任何客戶通知</b>（Issue #24 G2）。
+     *
+     * <p>輸入是工作流實際能提供的最小物件 {@link CustomerNotificationRequest}
+     * （{@code orderId}／{@code customerEmail}／{@code customerName}），
+     * 取代先前無人生產、也無法由 workflow 起始輸入綁定的 {@code Order} 參數。
+     * output 以 {@code notified=false} 明確標示尚未寄送，避免工作流定義
+     * 把「有這個步驟」誤讀為「已通知客戶」。
+     */
     @WorkerTask(value = "notify_customer", threadCount = 2, pollingInterval = 300)
     public Map<String, Object> checkForCustomerNotifications(CustomerNotificationRequest customerNotificationRequest) {
         Map<String, Object> result = new HashMap<>();
+        result.put("notified", false);
         return result;
     }
 //
