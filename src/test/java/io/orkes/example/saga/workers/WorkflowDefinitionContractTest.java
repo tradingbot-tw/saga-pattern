@@ -375,8 +375,12 @@ class WorkflowDefinitionContractTest {
                         }
                         if (rest != null && !rest.isEmpty()) {
                             String subKey = rest.substring(1).split("\\.")[0];
-                            Set<String> jqKeys = jqTopLevelKeys(text(task, "queryExpression"));
-                            if (!jqKeys.isEmpty() && !jqKeys.contains(subKey)) {
+                            Set<String> jqKeys = jqTopLevelKeys(queryExpressionOf(task));
+                            if (jqKeys.isEmpty()) {
+                                // 解析不出欄位就無法驗證：回報而不是略過，避免「沒檢查」看起來像「通過」
+                                violations.add(wfName + ": ${" + expr + "} 引用 " + ref
+                                        + " 的 result key，但無法從其 queryExpression 解析出產出的欄位");
+                            } else if (!jqKeys.contains(subKey)) {
                                 violations.add(wfName + ": ${" + expr + "} 引用的 result key \"" + subKey
                                         + "\" 不在 queryExpression 產出的欄位 " + jqKeys + " 中");
                             }
@@ -509,6 +513,41 @@ class WorkflowDefinitionContractTest {
                 "違規訊息應指出不存在的輸出 key，實際為: " + violations.get(0));
         assertTrue(violations.get(0).contains("order_food_ref"),
                 "違規訊息應指出被引用的 taskReferenceName，實際為: " + violations.get(0));
+    }
+
+    @Test
+    @DisplayName("負面：補償 workflow 引用 JQ 擷取結果中不存在的欄位時，檢查 5 失敗並指出該欄位")
+    void check5FailsOnUnknownJqResultKey() {
+        Map<String, JsonNode> mutated = new LinkedHashMap<>(workflows);
+        JsonNode copy = workflows.get("FoodDeliveryFailureWorkflow").deepCopy();
+        ((ObjectNode) copy.get("outputParameters"))
+                .put("orderId", "${extract_failure_context_ref.output.result.order_id}");
+        mutated.put("FoodDeliveryFailureWorkflow", copy);
+
+        List<String> violations = expressionViolations(mutated);
+        assertEquals(1, violations.size(), "應恰好指出 1 項違規，實際為: " + violations);
+        assertTrue(violations.get(0).contains("order_id"),
+                "違規訊息應指出不存在的 result 欄位，實際為: " + violations.get(0));
+        assertTrue(violations.get(0).contains("orderId") && violations.get(0).contains("failedTaskName"),
+                "違規訊息應列出 queryExpression 實際產出的欄位，實際為: " + violations.get(0));
+    }
+
+    @Test
+    @DisplayName("負面：JQ 任務的 queryExpression 解析不出欄位時，檢查 5 回報而不是略過")
+    void check5ReportsUnparseableJqExpression() {
+        Map<String, JsonNode> mutated = new LinkedHashMap<>(workflows);
+        JsonNode copy = workflows.get("FoodDeliveryFailureWorkflow").deepCopy();
+        for (JsonNode task : collectTasks(copy.get("tasks"))) {
+            if ("JSON_JQ_TRANSFORM".equals(typeOf(task))) {
+                ((ObjectNode) task.get("inputParameters")).put("queryExpression", ".parent");
+            }
+        }
+        mutated.put("FoodDeliveryFailureWorkflow", copy);
+
+        List<String> violations = expressionViolations(mutated);
+        assertFalse(violations.isEmpty(), "解析不出欄位時不得視為通過");
+        assertTrue(violations.stream().allMatch(v -> v.contains("無法從其 queryExpression 解析出產出的欄位")),
+                "每項違規都應說明無法解析，實際為: " + violations);
     }
 
     // ==================================================================
@@ -682,7 +721,7 @@ class WorkflowDefinitionContractTest {
     /**
      * 解析 JSON_JQ_TRANSFORM 的 queryExpression：取最外層物件在深度 1 上的 key
      * （含裸 key 與字串 key），用於驗證 {@code <ref>.output.result.<key>} 的 sub-key。
-     * 解析不出 key 時回傳空集合，呼叫端跳過 sub-key 檢查（避免對 jq 語法做過度假設）。
+     * 解析不出 key 時回傳空集合；呼叫端把它當成違規回報（不略過）。
      */
     private static Set<String> jqTopLevelKeys(String expression) {
         Set<String> keys = new TreeSet<>();
@@ -731,6 +770,16 @@ class WorkflowDefinitionContractTest {
             i++;
         }
         return keys;
+    }
+
+    /**
+     * JSON_JQ_TRANSFORM 的 queryExpression 依 Conductor 慣例放在 {@code inputParameters} 底下
+     * （conductor/workflows 的定義即是如此）；相容寫在 task 頂層的舊寫法。
+     */
+    private static String queryExpressionOf(JsonNode task) {
+        JsonNode inputs = task.get("inputParameters");
+        String nested = inputs == null ? null : text(inputs, "queryExpression");
+        return nested != null ? nested : text(task, "queryExpression");
     }
 
     private static String typeOf(JsonNode task) {
