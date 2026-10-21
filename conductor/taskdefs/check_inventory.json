@@ -1,0 +1,19 @@
+{
+  "name": "check_inventory",
+  "description": "Check restaurant availability (read-only).",
+  "retryCount": 3,
+  "retryLogic": "FIXED",
+  "retryDelaySeconds": 10,
+  "timeoutSeconds": 300,
+  "responseTimeoutSeconds": 60,
+  "timeoutPolicy": "TIME_OUT_WF",
+  "concurrentExecLimit": 0,
+  "rateLimitPerFrequency": 0,
+  "rateLimitFrequencyInSeconds": 1,
+  "pollTimeoutSeconds": 0,
+  "inputKeys": [
+    "restaurantId",
+    "items"
+  ],
+  "outputKeys": []
+}
