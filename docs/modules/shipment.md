@@ -17,7 +17,7 @@
 
 補償端 worker `cancel_delivery` 呼叫 `ShipmentService.cancelDelivery`，回傳受影響列數：
 `0`（查無外送單）→ `FAILED_WITH_TERMINAL_ERROR`；資料庫例外 → `FAILED`（可重試）
-（`workers/ConductorWorkers.java:165-180`）。
+（`workers/ConductorWorkers.java:165-179`）。
 
 ## 2. `createShipment` 的三條路徑
 
@@ -26,9 +26,9 @@
 
 | 路徑 | 觸發條件 | DB 結果 | 回傳值 |
 |---|---|---|---|
-| **有司機** | 寫入成功且 `driverId` 對應的司機列存在且 `name` 非空白 | 一筆 `CONFIRMED`（插入時為 `SCHEDULED`，随即被 `confirmShipment` 更新） | 實際 `driverId`（1–3） |
+| **有司機** | 寫入成功且 `driverId` 對應的司機列存在且 `name` 非空白 | 一筆 `CONFIRMED`（插入時為 `SCHEDULED`，隨後被 `confirmShipment` 更新） | 實際 `driverId`（1–3） |
 | **找不到司機** | 寫入成功但 `readDriver` 讀到空白 `name`（含 `findDriver()` 回 0 的情況） | **先寫入再自行取消**：同一筆轉為 `CANCELED`，紀錄仍留在 DB | `0` |
-| **寫入失敗** | `insertShipment` 回傳 `false`（如 `address` 缺失觸發 NOT NULL，`ShipmentDAO.java:27-33`） | **不留任何紀錄**（沒有部分寫入） | `0` |
+| **寫入失敗** | `insertShipment` 回傳 `false`（如 `address` 缺失違反 NOT NULL（`BaseDAO.java:162`）→ `SQLException` 被捕捉（`ShipmentDAO.java:29-32`）） | **不留任何紀錄**（沒有部分寫入） | `0` |
 
 關鍵時機（「先寫入才取消」）：`ShipmentService.java:27-30` 寫入失敗即 `return 0`，**不會**
 執行後續的取消；只有在寫入成功之後、於 `ShipmentService.java:36-40` 發現司機名稱空白時，
@@ -50,7 +50,7 @@ id 0 的司機（§3）。
 - **機率**：每次抽到 0 的機率是 1/4，十次全中為 (1/4)^10 = 1/1,048,576 ≈ **1e-6**。
   換言之回傳 0 極罕見，`createShipment` 幾乎總是用 1–3 的 id 去查司機。
 - **可及範圍**：`nextInt(4)` 永遠回傳 0–3。種子司機有 4 位、id 採 AUTOINCREMENT 為 1–4
-  （`dao/BaseDAO.java:140-150, 200-207`），因此 **id 4（Tom Cruise）永遠不會被指派**，
+  （`dao/BaseDAO.java:138-152, 200-211`），因此 **id 4（Tom Cruise）永遠不會被指派**，
   id 0 則本來就不存在——它是「查無司機」的保留值。
 - **對測試的意義**：「找不到司機 → 自行取消」這條補償路徑（§2 第二列）**無法靠隨機重試
   穩定觸發**（約百萬分之一）。`ShipmentServiceTest` 因此改用資料操作觸發：暫時刪除
@@ -65,11 +65,14 @@ id 0 的司機（§3）。
 本 repo 的 DAO 實際寫入的轉換：
 
 ```
-（insert，一律 SCHEDULED）→ SCHEDULED ──confirmShipment──> CONFIRMED
-        │                                                      │
-        └──────────cancelShipment（撤銷尚未確認）──┐            │
-                                                   v            v
-                                                CANCELED <──cancelShipment
+        insertShipment（一律寫入 SCHEDULED）
+                │
+                v
+           SCHEDULED ──confirmShipment──> CONFIRMED
+                │                              │
+                │ cancelShipment               │ cancelShipment
+                ▼                              ▼
+                            CANCELED
 ```
 
 - `insertShipment` 寫入時**固定** `status = SCHEDULED`，不讀 POJO 的 `status` 欄位
@@ -94,7 +97,7 @@ id 0 的司機（§3）。
 ——找不到司機時已寫入並取消（`CANCELED`），寫入失敗時根本沒有紀錄。補償流程若再呼叫
 `cancel_delivery`，後者是 `UPDATE` 已取消列（冪等、無必要），或在寫入失敗情境下對
 不存在的紀錄回傳 0、讓 worker 以 `FAILED_WITH_TERMINAL_ERROR` 中斷補償
-（`workers/ConductorWorkers.java:165-180`）。
+（`workers/ConductorWorkers.java:165-179`）。
 通知步驟失敗則不同：能走到 `notify_*` 代表出貨已成功 `CONFIRMED`，所以那兩個分支需要
 `cancel_delivery`。
 
@@ -128,7 +131,7 @@ id 0 的司機（§3）。
 | `shipmentStatusEnumIsClosed`（`:129-136`） | 狀態枚舉恰好 4 值（§4） |
 
 兩組測試皆不需外部服務：走 SQLite 測試資料庫（service 層因連線字串寫死而沿用應用資料庫檔
-並以唯一 orderId 隔離，`ShipmentServiceTest.java:33-37`）。
+並以唯一 orderId 隔離，`ShipmentServiceTest.java:34-35`）。
 
 ## 7. 證據索引
 
@@ -138,6 +141,6 @@ id 0 的司機（§3）。
 | `findDriver` 隨機特性 | `ShipmentService.java:59-69` |
 | 狀態寫入 | `ShipmentDAO.java:15-34`（SCHEDULED）、`:40-50`（CANCELED，回列數）、`:52-62`（CONFIRMED） |
 | 狀態枚舉 | `Shipment.java:7-12` |
-| 司機種子資料與 id 範圍 | `BaseDAO.java:140-150, 200-207` |
-| worker 狀態對應 | `ConductorWorkers.java:91-103`（ship_food）、`:165-180`（cancel_delivery） |
+| 司機種子資料與 id 範圍 | `BaseDAO.java:138-152, 200-211` |
+| worker 狀態對應 | `ConductorWorkers.java:91-103`（ship_food）、`:165-179`（cancel_delivery） |
 | 補償分支不含 cancel_delivery | `conductor/workflows/FoodDeliveryFailureWorkflow.v1.json`；`conductor/PROVENANCE.md` §4 補償對照表 |
