@@ -15,7 +15,7 @@
 ## 2. 權威來源
 
 - **版控**：本目錄 `conductor/**` 是唯一權威來源。
-- **執行環境**：合併後註冊到 `https://developer.orkescloud.com/api`（tradingbot.tw 的 Orkes 帳號）。本機 `conductor-standalone` 僅供開發。
+- **執行環境**：已於 2026-10-21 註冊到 `https://developer.orkescloud.com/api`（tradingbot.tw 的 Orkes 帳號）。本機 `conductor-standalone` 僅供開發。
 - 之後若在 Orkes UI 修改定義，必須匯出回本目錄並開 PR，否則版控與 server 會再次分離（這正是 TB1 揭露的根因）。
 
 ## 3. 依據（每個結構都可追溯）
@@ -56,10 +56,11 @@
 
 ## 5. 推論（未經 server 驗證，列為待確認）
 
+> 2026-10-21 更新：原本的「補償 workflow 讀得到原 workflow 的 `customerEmail`／`customerName`」已在 server 上實測確認（見 §7），移出本節。
+
 | 項目 | 說明 |
 |---|---|
 | 補償 workflow 的通知使用 `notify_customer` | 原文說「通知使用者失敗」，repo 只有這個客戶通知 worker |
-| 補償 workflow 能讀到原 workflow 的 `customerEmail`、`customerName` | 依 Conductor 開源版行為：failure workflow 的輸入包含原 workflow 輸入，另加 `workflowId`、`reason`、`failureStatus`、`failedWorkflow`。官方範例只用了 `failedWorkflow`，所以這一項仍是推論；註冊後以一次失敗的執行驗證 |
 
 ## 6. 待決問題（需人類裁定）
 
@@ -73,6 +74,16 @@
 - 反向測試：故意改壞輸出 key、task 名稱、SWITCH 分支名稱、JQ 結果欄位，以及造成 ref 重複，驗證都會失敗。
 - JQ 表達式以 `jq` 實測三種情況：output 有 `orderId`、output 為空但 tasks 有、在 `order_food` 就失敗（`orderId` 為 null，走 `defaultCase`）。
 - 正式的驗證器與契約測試由 TB3 實作（TB1 報告 §7.1 AC3、AC7）。
+
+### 註冊與 server 實測（2026-10-21）
+
+- 註冊：9 個 TaskDef（`POST /metadata/taskdefs`）、`FoodDeliveryFailureWorkflow`、`FoodDeliveryWorkflow`（`PUT /metadata/workflow`）到 `https://developer.orkescloud.com/api`，皆 HTTP 200；不需要 `ownerEmail`。
+- 讀回比對：本目錄 11 個檔案的每一個欄位，在 server 上的值完全一致。server 另加的欄位（建立／更新時間與建立者、`ownerEmail`、預設值）只存在 server，不回寫本目錄。
+- 端到端實測（以 API 扮演 worker，不指定 task domain，測試資料為 `tb2-verify@example.invalid`）：
+  - 主流程：`order_food` 收到正確對映的輸入 → 回 `orderId`；`check_inventory` 完成；`make_payment` 收到 `orderId` → 模擬 `FAILED_WITH_TERMINAL_ERROR`。主流程 `FAILED`，`output.orderId` 有值，`failedReferenceTaskNames = [make_payment_ref]`，並自動啟動補償流程。
+  - 補償流程的輸入含原 workflow 的 `customerEmail`、`customerName`，另有 `workflowId`、`reason`、`failedWorkflow`。
+  - JQ 擷取得到 `orderId = verify-order-1`、`failedTaskName = make_payment_ref`；`SWITCH` 走 `make_payment_ref` 分支：`cancel_payment` → `cancel_order` → `notify_customer`（帶 email 與姓名），**沒有**排程 `cancel_delivery`；補償流程 `COMPLETED`。
+  - 執行紀錄：主流程 `ld3t5ead1f4f-cd0d-11f1-aff9-321d2204384c`、補償流程 `ld3t616ba4eb-cd0d-11f1-ba7a-56adf5b8ca14`（correlationId `tb2-verify`）。
 
 ## 8. 檔案雜湊（SHA-256）
 
