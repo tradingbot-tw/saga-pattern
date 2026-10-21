@@ -9,6 +9,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 
@@ -131,5 +134,72 @@ class PaymentServiceTest {
 
         assertEquals(0, SagaTestDb.count(URL,
                 "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId + "'"));
+    }
+
+    /**
+     * 只在 {@code orderId} 這一列發生的 INSERT 失敗：用 SQLite trigger 讓
+     * {@code insertPayment} 收到 SQLException，模擬「付款紀錄寫入失敗」。
+     *
+     * <p>trigger 用完即刪，避免污染共用 app DB 的其他測試。
+     */
+    private static void withFailingInsertFor(String orderId, ThrowingRunnable action) throws Exception {
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_payment_insert BEFORE INSERT ON payments "
+                    + "WHEN NEW.orderId = '" + orderId + "' "
+                    + "BEGIN SELECT RAISE(ABORT, 'simulated payment insert failure'); END");
+            try {
+                action.run();
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_payment_insert");
+            }
+        }
+    }
+
+    private static Payment createPaymentWithFailingInsert(String orderId) throws Exception {
+        Payment[] created = new Payment[1];
+        withFailingInsertFor(orderId, () -> created[0] =
+                PaymentService.createPayment(request(orderId, "Credit Card", futureExpiry())));
+        return created[0];
+    }
+
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    @Test
+    @DisplayName("付款紀錄寫入失敗：回 FAILED 與 \"Payment creation failure\"，且 DB 不留任何紀錄")
+    void insertFailureReturnsFailedPaymentAndLeavesNoRecord() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+
+        Payment payment = createPaymentWithFailingInsert(orderId);
+
+        assertNotNull(payment.getPaymentId(), "即使寫入失敗，回傳的 Payment 仍帶著本次嘗試的 id");
+        assertEquals(Payment.Status.FAILED, payment.getStatus());
+        assertEquals("Payment creation failure", payment.getErrorMsg(),
+                "必須是補償流程看得懂的寫入失敗原因");
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId + "'"),
+                "寫入失敗時不能留下半筆付款紀錄");
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM payments WHERE paymentId = '" + payment.getPaymentId() + "'"),
+                "回傳的 paymentId 也不該落庫（後續 updatePaymentStatus 應為 no-op）");
+    }
+
+    @Test
+    @DisplayName("寫入失敗使 cancel_payment 回 FAILED_WITH_TERMINAL_ERROR：查無付款、補償不可重試")
+    void insertFailureMakesCancelPaymentReturnTerminalError() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+
+        Payment payment = createPaymentWithFailingInsert(orderId);
+        assertEquals(Payment.Status.FAILED, payment.getStatus(), "前置條件：本次付款建立失敗");
+
+        assertEquals(0, PaymentService.cancelPayment(orderId),
+                "沒有付款紀錄時 cancelPayment 回 0，cancel_payment worker 會轉成 "
+                        + "FAILED_WITH_TERMINAL_ERROR");
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId + "'"),
+                "補償後仍不應有該 orderId 的付款紀錄");
     }
 }
