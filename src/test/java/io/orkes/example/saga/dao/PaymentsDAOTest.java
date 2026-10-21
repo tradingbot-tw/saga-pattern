@@ -85,11 +85,45 @@ class PaymentsDAOTest {
         dao.insertPayment(payment);
 
         payment.setStatus(Payment.Status.SUCCESSFUL);
-        dao.updatePaymentStatus(payment);
+        assertEquals(1, dao.updatePaymentStatus(payment), "更新既有付款應回傳受影響的 1 列");
 
         Payment read = new Payment();
         dao.readPayment(orderId, read);
         assertEquals(Payment.Status.SUCCESSFUL, read.getStatus());
+    }
+
+    @Test
+    @DisplayName("步驟失敗訊號：更新不存在的付款回傳 0，不再只印訊息")
+    void updateUnknownPaymentReturnsZero() {
+        Payment missing = pendingPayment(SagaTestDb.uniqueId("missing-payment"));
+        missing.setStatus(Payment.Status.CANCELED);
+
+        assertEquals(0, dao.updatePaymentStatus(missing),
+                "UPDATE 沒有命中任何列時必須回傳 0");
+    }
+
+    @Test
+    @DisplayName("補償（多重付款）：cancelPaymentsByOrderId 一次取消同一 orderId 的全部付款")
+    void cancelPaymentsByOrderIdCancelsEveryPayment() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        Payment first = pendingPayment(orderId);
+        Payment second = pendingPayment(orderId);
+        assertEquals("", dao.insertPayment(first));
+        assertEquals("", dao.insertPayment(second));
+
+        assertEquals(2, dao.cancelPaymentsByOrderId(orderId));
+
+        assertEquals(0, SagaTestDb.count(url,
+                        "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId
+                                + "' AND status <> 'CANCELED'"),
+                "同一 orderId 的每一筆付款都必須是 CANCELED");
+    }
+
+    @Test
+    @DisplayName("步驟失敗訊號：cancelPaymentsByOrderId 查無付款時回傳 0")
+    void cancelPaymentsByOrderIdReturnsZeroForUnknownOrder() {
+        assertEquals(0, dao.cancelPaymentsByOrderId(SagaTestDb.uniqueId("missing-order")),
+                "查無付款時必須回傳 0，讓 worker 回報 terminal error");
     }
 
     @Test
@@ -102,7 +136,7 @@ class PaymentsDAOTest {
         dao.updatePaymentStatus(payment);
 
         payment.setStatus(Payment.Status.CANCELED);
-        dao.updatePaymentStatus(payment);
+        assertEquals(1, dao.updatePaymentStatus(payment));
 
         Payment read = new Payment();
         dao.readPayment(orderId, read);

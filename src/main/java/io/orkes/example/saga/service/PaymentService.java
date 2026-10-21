@@ -49,12 +49,15 @@ public class PaymentService {
         return payment;
     }
 
-    public static void cancelPayment(String orderId) {
-        // Cancel Payment in DB
-        Payment payment = new Payment();
-        paymentsDAO.readPayment(orderId, payment);
-        payment.setStatus(Payment.Status.CANCELED);
-        paymentsDAO.updatePaymentStatus(payment);
+    /**
+     * 取消指定訂單的付款，回傳受影響的列數（Issue #34）。
+     *
+     * <p>查無付款時回傳 {@code 0}；資料庫失敗時丟出
+     * {@link io.orkes.example.saga.dao.DataAccessException}，由 worker 轉成 task 失敗。
+     */
+    public static int cancelPayment(String orderId) {
+        // 同一 orderId 可能有多筆付款（重試或多次付款），必須一次全部取消。
+        return paymentsDAO.cancelPaymentsByOrderId(orderId);
     }
 
     private static boolean makePayment(Payment payment) {

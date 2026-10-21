@@ -115,17 +115,19 @@ class PaymentServiceTest {
         String orderId = SagaTestDb.uniqueId("order");
         PaymentService.createPayment(request(orderId, "Credit Card", futureExpiry()));
 
-        PaymentService.cancelPayment(orderId);
+        assertEquals(1, PaymentService.cancelPayment(orderId),
+                "既有付款應被取消一列");
 
         assertEquals(Payment.Status.CANCELED.name(), statusInDb(orderId));
     }
 
     @Test
-    @DisplayName("補償的邊界：查無付款時 cancelPayment 不拋錯，也不留下任何付款紀錄")
+    @DisplayName("補償的邊界：查無付款時 cancelPayment 回傳 0、不拋錯，也不留下任何付款紀錄")
     void cancelPaymentOnUnknownOrderIsHarmless() throws Exception {
         String orderId = SagaTestDb.uniqueId("ghost");
 
-        PaymentService.cancelPayment(orderId);
+        assertEquals(0, PaymentService.cancelPayment(orderId),
+                "查無付款時 service 回傳 0，由 worker 決定 terminal error");
 
         assertEquals(0, SagaTestDb.count(URL,
                 "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId + "'"));

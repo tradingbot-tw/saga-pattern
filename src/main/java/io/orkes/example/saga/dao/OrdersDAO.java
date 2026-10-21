@@ -59,7 +59,13 @@ public class OrdersDAO extends BaseDAO {
         return "";
     }
 
-    public void updateOrder(Order order) {
+    /**
+     * 更新訂單，回傳受影響的列數（Issue #34：不再 silent no-op）。
+     *
+     * <p>回傳 {@code 0} 代表 {@code orderId} 不存在，呼叫端必須回報 terminal error，
+     * 不得當成補償成功。
+     */
+    public int updateOrder(Order order) {
         String sql = "UPDATE orders SET restaurantId=?,deliveryAddress=?,status=? WHERE orderId=?";
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
@@ -67,9 +73,27 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(2, order.getDeliveryAddress());
             pstmt.setString(3, order.getStatus().name());
             pstmt.setString(4, order.getOrderId());
-            pstmt.executeUpdate();
+            return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException("Failed to update order " + order.getOrderId(), e);
+        }
+    }
+
+    /**
+     * 只把訂單狀態改為 {@code CANCELLED}，回傳受影響的列數（Issue #34 的補償 primitive）。
+     *
+     * <p>與 {@link #updateOrder(Order)} 的差別是只動 status 欄位，不會用補償時不完整的
+     * {@link Order} 覆寫 {@code restaurantId} / {@code deliveryAddress}。
+     */
+    public int cancelOrder(String orderId) {
+        String sql = "UPDATE orders SET status=? WHERE orderId=?";
+
+        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, Order.Status.CANCELLED.name());
+            pstmt.setString(2, orderId);
+            return pstmt.executeUpdate();
+        } catch (SQLException e) {
+            throw new DataAccessException("Failed to cancel order " + orderId, e);
         }
     }
 
