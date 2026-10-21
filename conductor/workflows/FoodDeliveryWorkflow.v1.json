@@ -1,0 +1,125 @@
+{
+  "name": "FoodDeliveryWorkflow",
+  "description": "Saga: order → inventory → payment → shipment → notify (fork/join). Rebuilt from code + public description; see conductor/PROVENANCE.md.",
+  "version": 1,
+  "schemaVersion": 2,
+  "restartable": true,
+  "workflowStatusListenerEnabled": false,
+  "timeoutPolicy": "ALERT_ONLY",
+  "timeoutSeconds": 0,
+  "failureWorkflow": "FoodDeliveryFailureWorkflow",
+  "inputParameters": [
+    "customerEmail",
+    "customerName",
+    "customerContact",
+    "restaurantId",
+    "foodItems",
+    "additionalNotes",
+    "address",
+    "deliveryInstructions",
+    "paymentAmount",
+    "paymentMethod"
+  ],
+  "tasks": [
+    {
+      "name": "order_food",
+      "taskReferenceName": "order_food_ref",
+      "type": "SIMPLE",
+      "inputParameters": {
+        "customerEmail": "${workflow.input.customerEmail}",
+        "customerName": "${workflow.input.customerName}",
+        "customerContact": "${workflow.input.customerContact}",
+        "restaurantId": "${workflow.input.restaurantId}",
+        "items": "${workflow.input.foodItems}",
+        "notes": "${workflow.input.additionalNotes}",
+        "deliveryAddress": "${workflow.input.address}",
+        "deliveryInstructions": "${workflow.input.deliveryInstructions}"
+      }
+    },
+    {
+      "name": "set_saga_context",
+      "taskReferenceName": "set_saga_context_ref",
+      "type": "SET_VARIABLE",
+      "inputParameters": {
+        "orderId": "${order_food_ref.output.orderId}"
+      }
+    },
+    {
+      "name": "check_inventory",
+      "taskReferenceName": "check_inventory_ref",
+      "type": "SIMPLE",
+      "inputParameters": {
+        "restaurantId": "${workflow.input.restaurantId}",
+        "items": "${workflow.input.foodItems}"
+      }
+    },
+    {
+      "name": "make_payment",
+      "taskReferenceName": "make_payment_ref",
+      "type": "SIMPLE",
+      "inputParameters": {
+        "orderId": "${order_food_ref.output.orderId}",
+        "amount": "${workflow.input.paymentAmount}",
+        "method": "${workflow.input.paymentMethod}"
+      }
+    },
+    {
+      "name": "ship_food",
+      "taskReferenceName": "ship_food_ref",
+      "type": "SIMPLE",
+      "inputParameters": {
+        "orderId": "${order_food_ref.output.orderId}",
+        "deliveryAddress": "${workflow.input.address}",
+        "deliveryInstructions": "${workflow.input.deliveryInstructions}"
+      }
+    },
+    {
+      "name": "notify_fork",
+      "taskReferenceName": "notify_fork_ref",
+      "type": "FORK_JOIN",
+      "inputParameters": {},
+      "forkTasks": [
+        [
+          {
+            "name": "notify_driver",
+            "taskReferenceName": "notify_driver_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${order_food_ref.output.orderId}",
+              "driverId": "${ship_food_ref.output.driverId}",
+              "dropOff": "${workflow.input.address}"
+            }
+          }
+        ],
+        [
+          {
+            "name": "notify_customer",
+            "taskReferenceName": "notify_customer_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${order_food_ref.output.orderId}",
+              "customerEmail": "${workflow.input.customerEmail}",
+              "customerName": "${workflow.input.customerName}"
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "notify_join",
+      "taskReferenceName": "notify_join_ref",
+      "type": "JOIN",
+      "inputParameters": {},
+      "joinOn": [
+        "notify_driver_ref",
+        "notify_customer_ref"
+      ]
+    }
+  ],
+  "outputParameters": {
+    "orderId": "${order_food_ref.output.orderId}",
+    "paymentId": "${make_payment_ref.output.paymentId}",
+    "paymentStatus": "${make_payment_ref.output.paymentStatus}",
+    "driverId": "${ship_food_ref.output.driverId}"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "ship_food",
+  "description": "Assign a driver and create the shipment. Not idempotent: no retry.",
+  "retryCount": 0,
+  "retryLogic": "FIXED",
+  "retryDelaySeconds": 10,
+  "timeoutSeconds": 300,
+  "responseTimeoutSeconds": 60,
+  "timeoutPolicy": "TIME_OUT_WF",
+  "concurrentExecLimit": 0,
+  "rateLimitPerFrequency": 0,
+  "rateLimitFrequencyInSeconds": 1,
+  "pollTimeoutSeconds": 0,
+  "inputKeys": [
+    "orderId",
+    "deliveryAddress",
+    "deliveryInstructions"
+  ],
+  "outputKeys": [
+    "driverId"
+  ]
+}
