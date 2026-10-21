@@ -1,6 +1,6 @@
 {
   "name": "FoodDeliveryFailureWorkflow",
-  "description": "Compensation for FoodDeliveryWorkflow (attached via failureWorkflow). Rebuilt; see conductor/PROVENANCE.md.",
+  "description": "Compensation for FoodDeliveryWorkflow (attached via failureWorkflow). Follows the conductor-sdk saga example: extract the failed task, then compensate only the steps that completed. See conductor/PROVENANCE.md.",
   "version": 1,
   "schemaVersion": 2,
   "restartable": true,
@@ -17,42 +17,139 @@
   ],
   "tasks": [
     {
-      "name": "cancel_delivery",
-      "taskReferenceName": "cancel_delivery_ref",
-      "type": "SIMPLE",
+      "name": "extract_failure_context",
+      "taskReferenceName": "extract_failure_context_ref",
+      "type": "JSON_JQ_TRANSFORM",
       "inputParameters": {
-        "orderId": "${workflow.input.failedWorkflow.variables.orderId}"
+        "parent": "${workflow.input.failedWorkflow}",
+        "queryExpression": "{ orderId: (.parent.output.orderId // first(.parent.tasks[]? | select(.referenceTaskName == \"order_food_ref\") | .outputData.orderId)), failedTaskName: .parent.failedReferenceTaskNames[0] }"
       }
     },
     {
-      "name": "cancel_payment",
-      "taskReferenceName": "cancel_payment_ref",
-      "type": "SIMPLE",
+      "name": "switch_compensate_from",
+      "taskReferenceName": "switch_compensate_from_ref",
+      "type": "SWITCH",
+      "evaluatorType": "value-param",
+      "expression": "failedTaskName",
       "inputParameters": {
-        "orderId": "${workflow.input.failedWorkflow.variables.orderId}"
-      }
-    },
-    {
-      "name": "cancel_order",
-      "taskReferenceName": "cancel_order_ref",
-      "type": "SIMPLE",
-      "inputParameters": {
-        "orderId": "${workflow.input.failedWorkflow.variables.orderId}"
-      }
+        "failedTaskName": "${extract_failure_context_ref.output.result.failedTaskName}"
+      },
+      "decisionCases": {
+        "check_inventory_ref": [
+          {
+            "name": "cancel_order",
+            "taskReferenceName": "cancel_order_after_inventory_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          }
+        ],
+        "make_payment_ref": [
+          {
+            "name": "cancel_payment",
+            "taskReferenceName": "cancel_payment_after_payment_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          },
+          {
+            "name": "cancel_order",
+            "taskReferenceName": "cancel_order_after_payment_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          }
+        ],
+        "ship_food_ref": [
+          {
+            "name": "cancel_payment",
+            "taskReferenceName": "cancel_payment_after_shipment_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          },
+          {
+            "name": "cancel_order",
+            "taskReferenceName": "cancel_order_after_shipment_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          }
+        ],
+        "notify_driver_ref": [
+          {
+            "name": "cancel_delivery",
+            "taskReferenceName": "cancel_delivery_after_notify_driver_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          },
+          {
+            "name": "cancel_payment",
+            "taskReferenceName": "cancel_payment_after_notify_driver_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          },
+          {
+            "name": "cancel_order",
+            "taskReferenceName": "cancel_order_after_notify_driver_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          }
+        ],
+        "notify_customer_ref": [
+          {
+            "name": "cancel_delivery",
+            "taskReferenceName": "cancel_delivery_after_notify_customer_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          },
+          {
+            "name": "cancel_payment",
+            "taskReferenceName": "cancel_payment_after_notify_customer_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          },
+          {
+            "name": "cancel_order",
+            "taskReferenceName": "cancel_order_after_notify_customer_ref",
+            "type": "SIMPLE",
+            "inputParameters": {
+              "orderId": "${extract_failure_context_ref.output.result.orderId}"
+            }
+          }
+        ]
+      },
+      "defaultCase": []
     },
     {
       "name": "notify_customer",
       "taskReferenceName": "notify_customer_failure_ref",
       "type": "SIMPLE",
       "inputParameters": {
-        "orderId": "${workflow.input.failedWorkflow.variables.orderId}",
+        "orderId": "${extract_failure_context_ref.output.result.orderId}",
         "customerEmail": "${workflow.input.customerEmail}",
         "customerName": "${workflow.input.customerName}"
       }
     }
   ],
   "outputParameters": {
-    "orderId": "${workflow.input.failedWorkflow.variables.orderId}",
+    "orderId": "${extract_failure_context_ref.output.result.orderId}",
+    "failedTaskName": "${extract_failure_context_ref.output.result.failedTaskName}",
     "failedWorkflowId": "${workflow.input.workflowId}",
     "reason": "${workflow.input.reason}"
   }

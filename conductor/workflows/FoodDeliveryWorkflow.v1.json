@@ -37,14 +37,6 @@
       }
     },
     {
-      "name": "set_saga_context",
-      "taskReferenceName": "set_saga_context_ref",
-      "type": "SET_VARIABLE",
-      "inputParameters": {
-        "orderId": "${order_food_ref.output.orderId}"
-      }
-    },
-    {
       "name": "check_inventory",
       "taskReferenceName": "check_inventory_ref",
       "type": "SIMPLE",
