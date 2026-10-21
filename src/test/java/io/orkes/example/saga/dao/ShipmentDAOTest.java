@@ -79,7 +79,7 @@ class ShipmentDAOTest {
         dao.insertShipment(shipment(orderId));
         dao.confirmShipment(orderId);
 
-        dao.cancelShipment(orderId);
+        assertEquals(1, dao.cancelShipment(orderId));
 
         assertEquals(Shipment.Status.CANCELED.name(), statusOf(orderId));
     }
@@ -90,9 +90,16 @@ class ShipmentDAOTest {
         String orderId = SagaTestDb.uniqueId("order");
         dao.insertShipment(shipment(orderId));
 
-        dao.cancelShipment(orderId);
+        assertEquals(1, dao.cancelShipment(orderId));
 
         assertEquals(Shipment.Status.CANCELED.name(), statusOf(orderId));
+    }
+
+    @Test
+    @DisplayName("步驟失敗訊號：取消不存在的外送單回傳 0，不再只印訊息")
+    void cancelUnknownShipmentReturnsZero() {
+        assertEquals(0, dao.cancelShipment(SagaTestDb.uniqueId("missing-order")),
+                "UPDATE 沒有命中任何列時必須回傳 0，讓 worker 回報 terminal error");
     }
 
     @Test

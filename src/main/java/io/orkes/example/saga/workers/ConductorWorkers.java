@@ -2,6 +2,7 @@ package io.orkes.example.saga.workers;
 
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import com.netflix.conductor.sdk.workflow.task.WorkerTask;
+import io.orkes.example.saga.dao.DataAccessException;
 import io.orkes.example.saga.pojos.*;
 import io.orkes.example.saga.service.InventoryService;
 import io.orkes.example.saga.service.OrderService;
@@ -124,26 +125,73 @@ public class ConductorWorkers {
         return result;
     }
 //
-    @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> cancelPaymentTask(CancelRequest cancelRequest) {
-        Map<String, Object> result = new HashMap<>();
-        PaymentService.cancelPayment(cancelRequest.getOrderId());
+    /**
+     * 補償步驟的成功結果（Issue #34）：三個 cancel_* 都以 {@link TaskResult} 回報，
+     * 不再回傳 {@code Map} 讓 SDK 一律標成 {@code COMPLETED}。
+     */
+    private static TaskResult completed() {
+        TaskResult result = new TaskResult();
+        result.setStatus(TaskResult.Status.COMPLETED);
         return result;
+    }
+
+    /**
+     * 補償步驟的失敗結果：{@code FAILED} 可重試（資料庫例外），
+     * {@code FAILED_WITH_TERMINAL_ERROR} 不可重試（目標不存在）。
+     */
+    private static TaskResult failed(TaskResult.Status status, String reason) {
+        TaskResult result = new TaskResult();
+        result.setStatus(status);
+        result.setReasonForIncompletion(reason);
+        return result;
+    }
+
+    @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
+    public TaskResult cancelPaymentTask(CancelRequest cancelRequest) {
+        String orderId = cancelRequest.getOrderId();
+        try {
+            int canceled = PaymentService.cancelPayment(orderId);
+            if (canceled == 0) {
+                return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                        "No payment found for order " + orderId);
+            }
+            return completed();
+        } catch (DataAccessException e) {
+            return failed(TaskResult.Status.FAILED,
+                    "Failed to cancel payment for order " + orderId + ": " + e.getMessage());
+        }
     }
 
     @WorkerTask(value = "cancel_delivery", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> cancelDeliveryTask(CancelRequest cancelRequest) {
-        Map<String, Object> result = new HashMap<>();
-        ShipmentService.cancelDelivery(cancelRequest.getOrderId());
-        return result;
+    public TaskResult cancelDeliveryTask(CancelRequest cancelRequest) {
+        String orderId = cancelRequest.getOrderId();
+        try {
+            int canceled = ShipmentService.cancelDelivery(orderId);
+            if (canceled == 0) {
+                return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                        "No shipment found for order " + orderId);
+            }
+            return completed();
+        } catch (DataAccessException e) {
+            return failed(TaskResult.Status.FAILED,
+                    "Failed to cancel delivery for order " + orderId + ": " + e.getMessage());
+        }
     }
 
     @WorkerTask(value = "cancel_order", threadCount = 2, pollingInterval = 300)
-    public Map<String, Object> cancelOrderTask(CancelRequest cancelRequest) {
-        Map<String, Object> result = new HashMap<>();
-        Order order = OrderService.getOrder(cancelRequest.getOrderId());
-        OrderService.cancelOrder(order);
-        return result;
+    public TaskResult cancelOrderTask(CancelRequest cancelRequest) {
+        String orderId = cancelRequest.getOrderId();
+        try {
+            int canceled = OrderService.cancelOrder(orderId);
+            if (canceled == 0) {
+                return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                        "No order found for order " + orderId);
+            }
+            return completed();
+        } catch (DataAccessException e) {
+            return failed(TaskResult.Status.FAILED,
+                    "Failed to cancel order " + orderId + ": " + e.getMessage());
+        }
     }
 
 }

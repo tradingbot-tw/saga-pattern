@@ -32,15 +32,36 @@ public class PaymentsDAO extends BaseDAO {
         return "";
     }
 
-    public void updatePaymentStatus(Payment payment) {
+    /**
+     * 更新付款狀態，回傳受影響的列數（Issue #34：不再 silent no-op）。
+     *
+     * <p>回傳 {@code 0} 代表 {@code paymentId} 不存在。
+     */
+    public int updatePaymentStatus(Payment payment) {
         String sql = "UPDATE payments SET status=? WHERE paymentId=?;";
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setString(1, payment.getStatus().name());
             pstmt.setString(2, payment.getPaymentId());
-            pstmt.executeUpdate();
+            return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException("Failed to update payment " + payment.getPaymentId(), e);
+        }
+    }
+
+    /**
+     * 把同一 {@code orderId} 的所有付款一次改為 {@code CANCELED}，回傳受影響的列數
+     * （Issue #34：多重付款不可只取消最後一筆）。
+     */
+    public int cancelPaymentsByOrderId(String orderId) {
+        String sql = "UPDATE payments SET status=? WHERE orderId=?;";
+
+        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
+            pstmt.setString(1, Payment.Status.CANCELED.name());
+            pstmt.setString(2, orderId);
+            return pstmt.executeUpdate();
+        } catch (SQLException e) {
+            throw new DataAccessException("Failed to cancel payments for order " + orderId, e);
         }
     }
 

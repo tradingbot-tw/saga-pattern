@@ -21,6 +21,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -236,34 +239,113 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @DisplayName("補償/回滾：cancel_order 把已建立的訂單轉為 CANCELLED")
+    @DisplayName("補償/回滾：cancel_order 把已建立的訂單轉為 CANCELLED 並回報 COMPLETED")
     void cancelOrderRollsBackCreatedOrder() {
         String orderId = String.valueOf(workers.orderFoodTask(orderRequest()).getOutputData().get("orderId"));
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        Map<String, Object> result = workers.cancelOrderTask(cancelRequest);
+        TaskResult result = workers.cancelOrderTask(cancelRequest);
 
-        assertTrue(result.isEmpty(), "補償步驟成功時回傳空輸出，實際為: " + result);
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
         assertEquals(Order.Status.CANCELLED, OrderService.getOrder(orderId).getStatus());
     }
 
     @Test
-    @DisplayName("補償/回滾：cancel_payment 把已成立的付款改為 CANCELED")
+    @DisplayName("補償失敗（terminal）：cancel_order 查無訂單時不得回報成功")
+    void cancelOrderFailsTerminallyWhenOrderDoesNotExist() {
+        String missingOrderId = SagaTestDb.uniqueId("missing-order");
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(missingOrderId);
+
+        TaskResult result = workers.cancelOrderTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus(),
+                "查無訂單不是可重試的失敗，應是 terminal error");
+        assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion");
+        assertTrue(result.getReasonForIncompletion().contains(missingOrderId),
+                "原因應指出查無的 orderId，實際為: " + result.getReasonForIncompletion());
+    }
+
+    @Test
+    @DisplayName("補償/回滾：cancel_payment 把已成立的付款改為 CANCELED 並回報 COMPLETED")
     void cancelPaymentRollsBackSuccessfulPayment() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        workers.cancelPaymentTask(cancelRequest);
+        TaskResult result = workers.cancelPaymentTask(cancelRequest);
 
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
         assertEquals("CANCELED", SagaTestDb.queryString(URL,
                 "SELECT status FROM payments WHERE orderId = '" + orderId + "'"));
     }
 
     @Test
-    @DisplayName("補償/回滾：cancel_delivery 把已排定的外送單改為 CANCELED")
+    @DisplayName("補償失敗（terminal）：cancel_payment 查無付款時必須回 FAILED_WITH_TERMINAL_ERROR")
+    void cancelPaymentFailsTerminallyWhenNoPaymentExists() {
+        String missingOrderId = SagaTestDb.uniqueId("missing-payment");
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(missingOrderId);
+
+        TaskResult result = workers.cancelPaymentTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus());
+        assertNotNull(result.getReasonForIncompletion());
+        assertTrue(result.getReasonForIncompletion().contains(missingOrderId),
+                "原因應指出查無付款的 orderId，實際為: " + result.getReasonForIncompletion());
+    }
+
+    @Test
+    @DisplayName("補償（多重付款）：cancel_payment 取消同一 orderId 的所有付款")
+    void cancelPaymentCancelsEveryPaymentForOrder() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
+        workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
+        assertEquals(2, SagaTestDb.count(URL,
+                "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId + "'"),
+                "前置條件：同一 orderId 應有兩筆付款");
+
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(orderId);
+        TaskResult result = workers.cancelPaymentTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM payments WHERE orderId = '" + orderId
+                                + "' AND status <> 'CANCELED'"),
+                "同一 orderId 的每一筆付款都必須被取消");
+    }
+
+    @Test
+    @DisplayName("補償失敗（可重試）：cancel_payment 遇資料庫寫入失敗時回 FAILED 並帶原因")
+    void cancelPaymentFailsRetryablyWhenDatabaseWriteFails() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(orderId);
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_cancel_payment BEFORE UPDATE ON payments "
+                    + "WHEN NEW.status = 'CANCELED' BEGIN SELECT RAISE(ABORT, 'simulated payment db failure'); END");
+            try {
+                TaskResult result = workers.cancelPaymentTask(cancelRequest);
+
+                assertEquals(TaskResult.Status.FAILED, result.getStatus(),
+                        "資料庫例外是可重試的失敗，不是 terminal error");
+                assertNotNull(result.getReasonForIncompletion());
+                assertTrue(result.getReasonForIncompletion().contains("simulated payment db failure"),
+                        "原因應保留資料庫錯誤訊息，實際為: " + result.getReasonForIncompletion());
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_cancel_payment");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("補償/回滾：cancel_delivery 把已排定的外送單改為 CANCELED 並回報 COMPLETED")
     void cancelDeliveryRollsBackScheduledShipment() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
         Shipment shipment = new Shipment();
@@ -275,10 +357,80 @@ class ConductorWorkersTest {
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        workers.cancelDeliveryTask(cancelRequest);
+        TaskResult result = workers.cancelDeliveryTask(cancelRequest);
 
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
         assertEquals("CANCELED", SagaTestDb.queryString(URL,
                 "SELECT status FROM shipments WHERE orderId = '" + orderId + "'"));
+    }
+
+    @Test
+    @DisplayName("補償失敗（terminal）：cancel_delivery 查無外送單時必須回 FAILED_WITH_TERMINAL_ERROR")
+    void cancelDeliveryFailsTerminallyWhenNoShipmentExists() {
+        String missingOrderId = SagaTestDb.uniqueId("missing-shipment");
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(missingOrderId);
+
+        TaskResult result = workers.cancelDeliveryTask(cancelRequest);
+
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus());
+        assertNotNull(result.getReasonForIncompletion());
+        assertTrue(result.getReasonForIncompletion().contains(missingOrderId),
+                "原因應指出查無外送單的 orderId，實際為: " + result.getReasonForIncompletion());
+    }
+
+    @Test
+    @DisplayName("補償失敗（可重試）：cancel_delivery 遇資料庫寫入失敗時回 FAILED 並帶原因")
+    void cancelDeliveryFailsRetryablyWhenDatabaseWriteFails() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        Shipment shipment = new Shipment();
+        shipment.setOrderId(orderId);
+        shipment.setDriverId(1);
+        shipment.setDeliveryAddress("1693 Alice Court, Annapolis MD 21401");
+        shipment.setDeliveryInstructions("放門口");
+        assertTrue(new ShipmentDAO(URL).insertShipment(shipment));
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(orderId);
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_cancel_delivery BEFORE UPDATE ON shipments "
+                    + "WHEN NEW.status = 'CANCELED' BEGIN SELECT RAISE(ABORT, 'simulated shipment db failure'); END");
+            try {
+                TaskResult result = workers.cancelDeliveryTask(cancelRequest);
+
+                assertEquals(TaskResult.Status.FAILED, result.getStatus());
+                assertNotNull(result.getReasonForIncompletion());
+                assertTrue(result.getReasonForIncompletion().contains("simulated shipment db failure"),
+                        "原因應保留資料庫錯誤訊息，實際為: " + result.getReasonForIncompletion());
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_cancel_delivery");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("補償失敗（可重試）：cancel_order 遇資料庫寫入失敗時回 FAILED 並帶原因")
+    void cancelOrderFailsRetryablyWhenDatabaseWriteFails() throws Exception {
+        String orderId = String.valueOf(workers.orderFoodTask(orderRequest()).getOutputData().get("orderId"));
+        CancelRequest cancelRequest = new CancelRequest();
+        cancelRequest.setOrderId(orderId);
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_cancel_order BEFORE UPDATE ON orders "
+                    + "WHEN NEW.status = 'CANCELLED' BEGIN SELECT RAISE(ABORT, 'simulated order db failure'); END");
+            try {
+                TaskResult result = workers.cancelOrderTask(cancelRequest);
+
+                assertEquals(TaskResult.Status.FAILED, result.getStatus());
+                assertNotNull(result.getReasonForIncompletion());
+                assertTrue(result.getReasonForIncompletion().contains("simulated order db failure"),
+                        "原因應保留資料庫錯誤訊息，實際為: " + result.getReasonForIncompletion());
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_cancel_order");
+            }
+        }
     }
 
     @Test
