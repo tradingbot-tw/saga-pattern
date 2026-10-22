@@ -18,6 +18,15 @@ public class InventoryService {
         restaurant.setId(restaurantId);
         restaurant.setName("");
         inventoryDAO.readRestaurant(restaurantId, restaurant);
-        return !Objects.equals(restaurant.getName(), "");
+        return isUsableRestaurantName(restaurant.getName());
+    }
+
+    /**
+     * 「餐廳可用」的名稱判斷式。抽成獨立方法讓測試能直接驗證 NULL／空白邊界
+     * （Issue #85：{@code restaurants.name} 是 {@code text NOT NULL}，無法以資料列製造 NULL）。
+     * 本層僅為測試接縫，行為與原本的 {@code !Objects.equals(name, "")} 相同。
+     */
+    static boolean isUsableRestaurantName(String name) {
+        return !Objects.equals(name, "");
     }
 }
