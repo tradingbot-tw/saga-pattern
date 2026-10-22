@@ -15,7 +15,7 @@ ordering 是系統唯一的對外入口。本文說明 `POST /triggerFoodDeliver
 | `WorkflowService` | `src/main/java/io/orkes/example/saga/service/WorkflowService.java:22-60` | 組裝 workflow input、啟動 `FoodDeliveryWorkflow` v1；啟動例外時回傳 error map |
 | `OrderService.createOrder` | `src/main/java/io/orkes/example/saga/service/OrderService.java:21-59` | 建立客戶與訂單，回傳 orderId；任一寫入失敗回傳 `null` |
 | `OrderService.cancelOrder` | `src/main/java/io/orkes/example/saga/service/OrderService.java:67-76` | 取消訂單，回傳受影響列數 |
-| `OrdersDAO` | `src/main/java/io/orkes/example/saga/dao/OrdersDAO.java:18-158` | `orders`／`orders_details`／`customers` 的 SQLite CRUD |
+| `OrdersDAO` | `src/main/java/io/orkes/example/saga/dao/OrdersDAO.java:18-186` | `orders`／`orders_details`／`customers` 的 SQLite CRUD |
 | `ConductorWorkers.orderFoodTask` | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:26-41` | `order_food` task：呼叫 `createOrder`，把 `null` 轉成 `FAILED` |
 | `ConductorWorkers.cancelOrderTask` | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:181-196` | `cancel_order` task：把列數與例外轉成 task 狀態 |
 | `Order.Status` | `src/main/java/io/orkes/example/saga/pojos/Order.java:10-15` | 訂單狀態列舉（以 `name()` 字串落地） |
@@ -115,19 +115,22 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
 
 | 步驟 | 實作 | 資料庫效果 |
 | --- | --- | --- |
-| 1. 建立客戶 | `OrdersDAO.insertCustomer`（`dao/OrdersDAO.java:122-158`） | 先以 `email` 查 `customers`：已存在就沿用該 `id`（**不更新** name／contact）；不存在則 `INSERT` 後再查回 `id` |
+| 1. 建立客戶 | `OrdersDAO.insertCustomer`（`dao/OrdersDAO.java:150-186`） | 先以 `email` 查 `customers`：已存在就沿用該 `id`（**不更新** name／contact）；不存在則 `INSERT` 後再查回 `id` |
 | 2. 建立訂單 | `OrderService.createOrder`（`service/OrderService.java:22-39`） | 產生隨機 UUID 作為 `orderId`；狀態固定 `PENDING`；帶入 `restaurantId`、`deliveryAddress` |
-| 3. 寫入訂單與明細 | `OrdersDAO.insertOrder`（`dao/OrdersDAO.java:18-60`） | 先 `INSERT INTO orders`，再 `INSERT INTO orders_details`（`items`／`notes`）。`items` 與 `notes` 以 Java 集合的 `toString()` 字串落地，不是結構化 JSON |
+| 3. 寫入訂單與明細 | `OrdersDAO.insertOrder`（`dao/OrdersDAO.java:18-79`） | 同一連線、同一交易（Issue #86）依序 `INSERT INTO orders`、`INSERT INTO orders_details`（`items`／`notes`），兩步全成才 `commit`。`items` 與 `notes` 以 Java 集合的 `toString()` 字串落地，不是結構化 JSON |
 | 4. 回傳結果 | `OrderService.createOrder`（`service/OrderService.java:48-58`） | `insertOrder` 回傳空字串代表成功，回傳 UUID；回傳非空錯誤訊息時記 log 並回傳 `null` |
 
-兩個 `INSERT` 各自開啟連線，**沒有交易包覆**（`dao/OrdersDAO.java:34,49`）。因此：
+兩個 `INSERT` 共用同一個連線，並以 `setAutoCommit(false)` 包成單一交易：任一步失敗先
+`rollback` 再回傳非空錯誤訊息（`dao/OrdersDAO.java:46-78`，Issue #86）。因此：
 
-- `orders` 寫入成功、`orders_details` 寫入失敗時，`orders` 會留下沒有明細的半成品列，
-  但 `createOrder` 仍回傳 `null`。
-- 訂單寫入失敗時，步驟 1 已建立的 `customers` 列不會回滾。
-- **這筆半成品訂單不會被補償**：`createOrder` 回傳 `null` 讓 `order_food` 轉 `FAILED`，而補償流程對
-  `order_food` 失敗不做任何事（見下一節），所以該列會**永遠停在 `PENDING`**，沒有任何機制取消它。
-  這是現行實作的缺陷，修正方向是把兩個 `INSERT` 放進同一個交易。
+- `orders` 寫入成功、`orders_details` 寫入失敗時，`orders` 列**一併回滾**，資料庫不會留下
+  沒有明細的半成品列。
+- 訂單寫入失敗時，步驟 1 已建立的 `customers` 列不會回滾（`insertCustomer` 在交易之外，
+  另行處理）。
+- **不會再有「半成品訂單停在 `PENDING`、補償涵蓋不到」的情況**：失敗即不留下訂單列，
+  交易保證取代了原先缺陷描述的修法方向（Issue #86 修復前，`createOrder` 回傳 `null` 讓
+  `order_food` 轉 `FAILED`，而補償流程對 `order_food` 失敗不做任何事（見下一節），
+  已寫入的 `PENDING` 列會永遠滯留——該缺陷已由交易包覆消除）。
 
 ### 失敗訊號：`null` 讓 `order_food` 轉 `FAILED`
 
@@ -143,10 +146,11 @@ workflow 掛有 `failureWorkflow: FoodDeliveryFailureWorkflow`
 （`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json`），所以 `order_food` 失敗時
 不會執行 `cancel_order`；最後的 `notify_customer` 仍會執行。
 
-這個設計假設「`order_food` 失敗＝沒有建立訂單」，但上一節的情況並不成立：`orders` 已寫入、
-`orders_details` 失敗時，資料庫**有**一筆 `PENDING` 訂單，補償流程卻不會取消它。要讓補償涵蓋這種
-情況，必須先讓 `createOrder` 在失敗時不留下任何訂單列（交易），而不是在補償 workflow 加
-`order_food_ref` 分支——失敗時 `order_food` 輸出的 `orderId` 是 `null`，補償拿不到可取消的訂單。
+這個設計假設「`order_food` 失敗＝沒有建立訂單」。Issue #86 之前該假設並不成立（`orders`
+已寫入、`orders_details` 失敗時，資料庫會有一筆補償涵蓋不到的 `PENDING` 訂單）；如今
+`createOrder` 的兩個 `INSERT` 由同一個交易包覆，失敗時不留下任何訂單列，假設已由實作保證——
+不需要、也不應該在補償 workflow 加 `order_food_ref` 分支：失敗時 `order_food` 輸出的
+`orderId` 是 `null`，資料庫裡本就沒有可取消的訂單。
 
 ## cancelOrder：補償語意
 
@@ -160,7 +164,7 @@ UPDATE orders SET status = 'CANCELLED' WHERE orderId = ?
 ```
 
 `OrdersDAO.cancelOrder` 回傳 `PreparedStatement.executeUpdate()` 的受影響列數
-（`dao/OrdersDAO.java:88-98`）：
+（`dao/OrdersDAO.java:116-126`）：
 
 | 情境 | 回傳值 |
 | --- | --- |
@@ -171,7 +175,7 @@ UPDATE orders SET status = 'CANCELLED' WHERE orderId = ?
 `0` 的語意是「查無此訂單」，**不是**「已經取消過」。`UPDATE` 以 `orderId` 為條件，
 已存在的 `CANCELLED` 訂單再次取消仍會命中該列；反覆執行不會新增列。
 此方法只改 `status`，不會用補償時不完整的 `Order` 覆寫 `restaurantId` 或
-`deliveryAddress`（與 `updateOrder` 的差別，見 `dao/OrdersDAO.java:62-88`）。
+`deliveryAddress`（與 `updateOrder` 的差別，見 `dao/OrdersDAO.java:90-107`）。
 
 ### worker 的狀態映射
 
@@ -204,7 +208,7 @@ UPDATE orders SET status = 'CANCELLED' WHERE orderId = ?
 ## 訂單狀態機
 
 `Order.Status` 定義四個狀態（`pojos/Order.java:10-15`），以 `name()` 字串寫入
-`orders.status`，讀取時用 `Order.Status.valueOf(...)` 還原（`dao/OrdersDAO.java:114`）。
+`orders.status`，讀取時用 `Order.Status.valueOf(...)` 還原（`dao/OrdersDAO.java:142`）。
 
 | 狀態 | 由誰寫入 |
 | --- | --- |
@@ -231,7 +235,7 @@ stateDiagram-v2
 - `PENDING → ASSIGNED → CONFIRMED` 是列舉定義的線性生命週期，但目前只有 `PENDING`
   （建立）與 `CANCELLED`（補償）會被實際寫入；`ASSIGNED`／`CONFIRMED` 尚無生產者。
 - `OrdersDAO.updateOrder` 接受呼叫端指定的任意 `Status`，同樣沒有轉移檢查
-  （`dao/OrdersDAO.java:68-80`）。
+  （`dao/OrdersDAO.java:96-107`）。
 
 ## 現有測試保護的行為
 
@@ -241,6 +245,7 @@ stateDiagram-v2
 | `OrderServiceTest` | `createOrderReturnsNullWhenOrderWriteFails` | `deliveryAddress` 為 `null` 違反 NOT NULL 時回傳 `null`，且不留下訂單列 |
 | `OrderServiceTest` | `cancelOrderMarksExistingOrderCancelled` | 既有訂單取消回傳 `1`，DB 狀態轉 `CANCELLED` |
 | `OrderServiceTest` | `cancelOrderOnUnknownOrderReturnsZero` | 查無訂單回傳 `0`、不拋錯、不寫入任何列 |
+| `OrderServiceTest` | `createOrderLeavesNoPartialRowsWhenDetailsInsertFails` | 以 SQLite `TRIGGER` 令 `orders_details` 的 `INSERT` 失敗：`createOrder` 回傳 `null`，且 `orders` 與 `orders_details` 都不得殘留該訂單的列（Issue #86 REQ-1 交易回滾） |
 | `OrderServiceControllerTest` | `endpointForwardsRequestUnalteredToWorkflowService` | controller 恰好呼叫 service 一次，且傳遞同一個請求物件（不複製／不改寫） |
 | `OrderServiceControllerTest` | `endpointReturnsWorkflowServiceResponseVerbatim` | 成功時 HTTP 200，body 與 service 回傳的是同一個 map |
 | `OrderServiceControllerTest` | `endpointPassesThroughFailureResponse` | 失敗的 error map 也以 HTTP 200 原樣透出，controller 不攔截 |
