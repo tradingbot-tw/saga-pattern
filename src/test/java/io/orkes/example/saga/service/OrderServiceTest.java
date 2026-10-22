@@ -5,7 +5,6 @@ import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -152,7 +151,6 @@ class OrderServiceTest {
     }
 
     @Test
-    @Disabled("Issue #86 紅燈重現：insertOrder 的兩個 INSERT 無交易包覆，明細失敗會殘留半成品訂單列；02-impl 修復後啟用")
     @DisplayName("REQ-1 交易回滾：orders_details 的 INSERT 失敗時，createOrder 回傳 null 且 orders 與 orders_details 都不得留下該訂單的列")
     void createOrderLeavesNoPartialRowsWhenDetailsInsertFails() throws Exception {
         String email = SagaTestDb.uniqueId("rollbuy") + "@example.com";
