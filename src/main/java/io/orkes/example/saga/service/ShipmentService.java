@@ -1,5 +1,6 @@
 package io.orkes.example.saga.service;
 
+import io.orkes.example.saga.dao.DataAccessException;
 import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.Driver;
 import io.orkes.example.saga.pojos.Shipment;
@@ -40,7 +41,11 @@ public class ShipmentService {
         }
         else {
             log.info("Assigned driver {} to order with id: {}", driverId, orderId);
-            shipmentDAO.confirmShipment(orderId);
+            if (shipmentDAO.confirmShipment(orderId) == 0) {
+                // Issue #84：確認沒有更新任何列也是失敗，不能讓呼叫端以為司機已指派成功。
+                throw new DataAccessException(
+                        "Failed to confirm shipment for order " + orderId + ": no rows updated", null);
+            }
         }
 
         return driverId;
