@@ -1,0 +1,40 @@
+conductor/PROVENANCE.md
+  h_a7614621effce7 25,97-100,105-108,114-116,121-122
+conductor/workflows/FoodDeliveryFailureWorkflow.v2.json
+  h_a7614621effce7 4
+conductor/workflows/FoodDeliveryWorkflow.v2.json
+  h_a7614621effce7 4
+docs/architecture.md
+  h_a7614621effce7 29,129,406
+docs/modules/inventory.md
+  h_a7614621effce7 20-21,151,155-157,162-165,168-170,264-265,300-301
+docs/modules/ordering.md
+  h_a7614621effce7 170-181,226,319
+docs/modules/shipment.md
+  h_a7614621effce7 114-131
+docs/modules/workflow.md
+  h_a7614621effce7 13-14,34
+specs/README.md
+  h_a7614621effce7 21,27
+src/main/java/io/orkes/example/saga/service/WorkflowService.java
+  h_a7614621effce7 25-27
+src/test/java/io/orkes/example/saga/e2e/OrkesCloudE2EVerificationTest.java
+  h_a7614621effce7 10,155-157,188,264-267,271-279,281,283,328-336,338
+src/test/java/io/orkes/example/saga/service/WorkflowServiceTest.java
+  h_a7614621effce7 86,96
+src/test/java/io/orkes/example/saga/workers/FailureWorkflowHarness.java
+  h_a7614621effce7 30,59,98
+src/test/java/io/orkes/example/saga/workers/SagaFlawReproductionTest.java
+  h_a7614621effce7 68-69,109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a95283b63ebbfefb53eecd1e4852cd06ec926763",
+  "prompts": {},
+  "humans": {
+    "h_a7614621effce7": {
+      "author": "tradingbot-tw <tradingbot.tw@gmail.com>"
+    }
+  }
+}
