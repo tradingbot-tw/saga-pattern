@@ -94,10 +94,20 @@
 - 本機：`SagaCompensationDefectTest` 以版控中的 JSON 執行補償流程（Conductor `Workflow`/`Task` 物件、
   jackson-jq、真實 `cancel_*` worker 與 SQLite，資料庫錯誤以 SQLite trigger 注入）；同一組測試在
   SWITCH 版定義下有 5 個情境失敗，在現行定義下全部通過。
-- 雲端：`OrkesCloudE2EVerificationTest` 重新註冊定義後以真實 Orkes Cloud 驗證 4 個情境
-  （付款被拒、重試後的失敗集合、`make_payment` 逾時、`confirmShipment` 失敗留下的 `SCHEDULED` 出貨單），
-  並斷言 server 實際傳給 worker 的 `orderId` 等於 `workflowId`、`allowMissing=true`。
-  E2E 結果與執行紀錄見該測試輸出。
+- 重新註冊（2026-10-22）：9 個 TaskDef（`POST /metadata/taskdefs`）與兩份 workflow（`PUT /metadata/workflow`）
+  皆 HTTP 200；未變更 version，直接覆蓋 version 1。
+- 雲端 E2E（`OrkesCloudE2EVerificationTest`，4 個情境全部通過，以 API 扮演 worker、各自使用獨立 task domain）：
+
+| 情境 | 主流程狀態 | 補償流程 | 主 workflow id |
+|---|---|---|---|
+| 付款被拒（`FAILED_WITH_TERMINAL_ERROR`） | `FAILED` | `cancel_delivery`（no-op）→ `cancel_payment` → `cancel_order` | `ld3tdaaa6032-cdf5-11f1-ba7a-56adf5b8ca14` |
+| A：`check_inventory` 失敗後重試成功、`ship_food` 失敗 | `FAILED` | 同上；**`failedReferenceTaskNames = [check_inventory_ref, ship_food_ref]`** 仍完整取消 | `ld3tcdb3e3c1-cdf5-11f1-aff9-321d2204384c` |
+| B：`make_payment` 未回報（`responseTimeoutSeconds` 逾時） | `TIMED_OUT` | 同上 | `ld3tdd30533b-cdf5-11f1-9071-46362399c705` |
+| D：`confirmShipment` 資料庫錯誤留下 `SCHEDULED` 出貨單 | `FAILED` | 同上，出貨單也被取消 | `ld3td78f648a-cdf5-11f1-ba7a-56adf5b8ca14` |
+
+每個情境都另外斷言 server 傳給 worker 的 `order_food.orderId` 等於 `workflowId`、三個
+`cancel_*` 的 `allowMissing` 為 `true`，且補償後資料庫無 `SUCCESSFUL` 付款、無
+`SCHEDULED`/`CONFIRMED` 出貨單、訂單為 `CANCELLED`。
 
 ## 8. 檔案雜湊（SHA-256）
 
