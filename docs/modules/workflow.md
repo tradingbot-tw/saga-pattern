@@ -10,8 +10,8 @@
 
 | 位置 | 內容 |
 | --- | --- |
-| `conductor/workflows/FoodDeliveryWorkflow.v1.json` | 主流程 `FoodDeliveryWorkflow`（version 1）；成功路徑與 `failureWorkflow` 的掛載點 |
-| `conductor/workflows/FoodDeliveryFailureWorkflow.v1.json` | 補償流程 `FoodDeliveryFailureWorkflow`（version 1）；不看失敗點，一律反向執行冪等的取消 |
+| `conductor/workflows/FoodDeliveryWorkflow.v2.json` | 主流程 `FoodDeliveryWorkflow`（version 2）；成功路徑與 `failureWorkflow` 的掛載點 |
+| `conductor/workflows/FoodDeliveryFailureWorkflow.v2.json` | 補償流程 `FoodDeliveryFailureWorkflow`（version 2）；不看失敗點，一律反向執行冪等的取消 |
 | `conductor/taskdefs/*.json` | 9 個 task 的 `TaskDef`：重試次數、重試間隔、timeout 與 input／output keys |
 | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java` | 9 個 `@WorkerTask` 的實作；task 名稱、輸入 POJO、輸出 key 與狀態語意的程式碼端 |
 | `src/main/java/io/orkes/example/saga/service/WorkflowService.java` | 啟動 `FoodDeliveryWorkflow` v1、組裝 10 個起始輸入、設定 task domain |
@@ -31,7 +31,7 @@ domain（`application.properties` 的預設值為 `saga`），與啟動請求的
 ### 2.1 起始輸入（10 個 key）
 
 `WorkflowService` 從 `FoodDeliveryRequest` 取下列 10 個欄位放入 workflow input，
-`FoodDeliveryWorkflow.v1.json` 的 `inputParameters` 也正好宣告這 10 個 key：
+`FoodDeliveryWorkflow.v2.json` 的 `inputParameters` 也正好宣告這 10 個 key：
 
 | workflow input key | 來源（`FoodDeliveryRequest`） |
 | --- | --- |

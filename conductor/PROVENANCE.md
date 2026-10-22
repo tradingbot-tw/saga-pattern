@@ -22,7 +22,7 @@
 
 | 結構 | 依據 |
 |---|---|
-| workflow 名稱 `FoodDeliveryWorkflow`、version 1 | `WorkflowService.startFoodDeliveryWorkflow`：`setName("FoodDeliveryWorkflow")`、`setVersion(1)` |
+| workflow 名稱 `FoodDeliveryWorkflow`、version 2 | `WorkflowService.startFoodDeliveryWorkflow`：`setName("FoodDeliveryWorkflow")`、`setVersion(2)`（#136–#139 由 version 1 升版） |
 | 起始輸入 10 個 key | 同上，`inputData.put(...)` 的 10 個 key |
 | 步驟順序 `order_food → check_inventory → make_payment → ship_food → FORK(notify_driver, notify_customer) → JOIN` | Baeldung〈Saga Pattern in a Microservices Architecture〉§5.1（https://www.baeldung.com/orkes-conductor-saga-pattern-spring-boot） |
 | `failureWorkflow: FoodDeliveryFailureWorkflow`；補償為取消付款、取消訂單、通知使用者 | 同文 §5.3 |
@@ -94,27 +94,32 @@
 - 本機：`SagaCompensationDefectTest` 以版控中的 JSON 執行補償流程（Conductor `Workflow`/`Task` 物件、
   jackson-jq、真實 `cancel_*` worker 與 SQLite，資料庫錯誤以 SQLite trigger 注入）；同一組測試在
   SWITCH 版定義下有 5 個情境失敗，在現行定義下全部通過。
-- 重新註冊（2026-10-22）：9 個 TaskDef（`POST /metadata/taskdefs`）與兩份 workflow（`PUT /metadata/workflow`）
-  皆 HTTP 200；未變更 version，直接覆蓋 version 1。
+- **升版為 version 2**：`FoodDeliveryWorkflow.v2.json` 與 `FoodDeliveryFailureWorkflow.v2.json`
+  （`WorkflowService` 啟動 version 2；version 1 保留在 server 上，讓進行中的舊 workflow 用它跑完）。
+  註冊：9 個 TaskDef（`POST /metadata/taskdefs`）與兩份 workflow（`PUT /metadata/workflow`）皆 HTTP 200；
+  讀回確認 server 上的 v2 `order_food.inputParameters.orderId` 為 `${workflow.workflowId}`。
 - 雲端 E2E（`OrkesCloudE2EVerificationTest`，4 個情境全部通過，以 API 扮演 worker、各自使用獨立 task domain）：
 
 | 情境 | 主流程狀態 | 補償流程 | 主 workflow id |
 |---|---|---|---|
-| 付款被拒（`FAILED_WITH_TERMINAL_ERROR`） | `FAILED` | `cancel_delivery`（no-op）→ `cancel_payment` → `cancel_order` | `ld3tdaaa6032-cdf5-11f1-ba7a-56adf5b8ca14` |
-| A：`check_inventory` 失敗後重試成功、`ship_food` 失敗 | `FAILED` | 同上；**`failedReferenceTaskNames = [check_inventory_ref, ship_food_ref]`** 仍完整取消 | `ld3tcdb3e3c1-cdf5-11f1-aff9-321d2204384c` |
-| B：`make_payment` 未回報（`responseTimeoutSeconds` 逾時） | `TIMED_OUT` | 同上 | `ld3tdd30533b-cdf5-11f1-9071-46362399c705` |
-| D：`confirmShipment` 資料庫錯誤留下 `SCHEDULED` 出貨單 | `FAILED` | 同上，出貨單也被取消 | `ld3td78f648a-cdf5-11f1-ba7a-56adf5b8ca14` |
+| 付款被拒（`FAILED_WITH_TERMINAL_ERROR`） | `FAILED` | `cancel_delivery`（no-op）→ `cancel_payment` → `cancel_order` | `ld3tdceb7c74-ce1c-11f1-89ad-1a5d2f4e051b` |
+| A：`check_inventory` 失敗後重試成功、`ship_food` 失敗 | `FAILED` | 同上；`failedReferenceTaskNames = [check_inventory_ref, ship_food_ref]` 仍完整取消 | `ld3td309cdb0-ce1c-11f1-aff9-321d2204384c` |
+| B：`make_payment` 未回報（task `timeoutSeconds` 300 秒逾時） | `TIMED_OUT`（實測約 300 秒） | 同上 | `ld3te1c92e62-ce1c-11f1-9071-46362399c705` |
+| D：`confirmShipment` 資料庫錯誤留下 `SCHEDULED` 出貨單 | `FAILED` | 同上，出貨單也被取消 | `ld3tdf7dac0d-ce1c-11f1-ba7a-56adf5b8ca14` |
 
 每個情境都另外斷言 server 傳給 worker 的 `order_food.orderId` 等於 `workflowId`、三個
 `cancel_*` 的 `allowMissing` 為 `true`，且補償後資料庫無 `SUCCESSFUL` 付款、無
 `SCHEDULED`/`CONFIRMED` 出貨單、訂單為 `CANCELLED`。
 
+> B 的等待時間必須大於 `make_payment` 的 `timeoutSeconds`（300 秒）：`responseTimeoutSeconds`
+> 那條路徑不會提早終止 workflow，實測是 task 逾時後才轉 `TIMED_OUT`。
+
 ## 8. 檔案雜湊（SHA-256）
 
 | 檔案 | SHA-256 |
 |---|---|
-| `workflows/FoodDeliveryFailureWorkflow.v1.json` | `b1deb36773c1668715cb96784e284f8cebf4f769c6dd000355805f2e55474ab8` |
-| `workflows/FoodDeliveryWorkflow.v1.json` | `9abaa85ed5d0f170e4f6c1fa2caa4612e7dddcbb6117eb1657cd90d1b54b019d` |
+| `workflows/FoodDeliveryFailureWorkflow.v2.json` | `1d368759d121efc05187a4f63233534bdf4e16d50f15212e4488c853072fe0f2` |
+| `workflows/FoodDeliveryWorkflow.v2.json` | `d73a43aecfd85bd97bf0a9ee502e83469a085e1064fbad7447b4b9384516873c` |
 | `taskdefs/cancel_delivery.json` | `9747760e866711d43b4bb95242435bf511b2c6887f065e9b47743541f1d6369f` |
 | `taskdefs/cancel_order.json` | `f18f9b359b4e5c0de0aefcd73c7d3950a8d199401f267ee725093d417c48371c` |
 | `taskdefs/cancel_payment.json` | `71b4fb474690757cfc139054571ef1e793d4ae2f59ce90da18609f81ed849da0` |

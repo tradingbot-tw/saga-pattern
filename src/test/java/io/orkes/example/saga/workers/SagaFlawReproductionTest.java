@@ -65,8 +65,8 @@ class SagaFlawReproductionTest {
     @Test
     @DisplayName("工作流修復驗證：補償 workflow 對付款呼叫 cancel_payment 時帶 allowMissing，查無付款不會中斷補償")
     void verifyWorkflowDefinitionNeverFailsOnMissingPayment() throws Exception {
-        File workflowFile = new File("conductor/workflows/FoodDeliveryFailureWorkflow.v1.json");
-        assertTrue(workflowFile.exists(), "FoodDeliveryFailureWorkflow.v1.json 必須存在");
+        File workflowFile = new File("conductor/workflows/FoodDeliveryFailureWorkflow.v2.json");
+        assertTrue(workflowFile.exists(), "FoodDeliveryFailureWorkflow.v2.json 必須存在");
 
         JsonNode root = MAPPER.readTree(workflowFile);
         boolean cancelPaymentFound = false;
@@ -106,7 +106,7 @@ class SagaFlawReproductionTest {
         assertEquals(TaskResult.Status.COMPLETED, inventoryResult.getStatus());
 
         // 3. 步驟 3: make_payment 任務失敗（未落庫成功）
-        // 依據現行 FoodDeliveryFailureWorkflow.v1.json：一律反向取消，cancel_payment 查無付款為 no-op，
+        // 依據現行 FoodDeliveryFailureWorkflow.v2.json：一律反向取消，cancel_payment 查無付款為 no-op，
         // 接著 cancel_order（allowMissing=true）
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);

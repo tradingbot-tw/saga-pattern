@@ -1,7 +1,7 @@
 {
   "name": "FoodDeliveryFailureWorkflow",
   "description": "Compensation for FoodDeliveryWorkflow (attached via failureWorkflow). Does not depend on which task failed: always cancels delivery, payment and order in reverse order with allowMissing=true (a step that never wrote data is a no-op), then notifies the customer. orderId falls back to the failed workflow's workflowId, which order_food uses as the order id. See conductor/PROVENANCE.md and specs/saga.qnt (CurrentWorkflow).",
-  "version": 1,
+  "version": 2,
   "schemaVersion": 2,
   "restartable": true,
   "workflowStatusListenerEnabled": false,

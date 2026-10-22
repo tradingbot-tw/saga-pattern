@@ -26,7 +26,7 @@ saga-pattern 是一個**教學用範例專案**，示範如何以 [Orkes Conduct
 ### 最關鍵的架構事實
 
 **Saga 的編排（orchestration）不在本 repo 的版控範圍內。** 應用只負責：
-(1) 以名稱 `FoodDeliveryWorkflow`（version 1）向外部 Conductor server 啟動 workflow
+(1) 以名稱 `FoodDeliveryWorkflow`（version 2）向外部 Conductor server 啟動 workflow
 （`src/main/java/io/orkes/example/saga/service/WorkflowService.java:22-35`）；
 (2) 在同一行程內註冊 9 個 Conductor worker task（`src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:25-128`）。
 Workflow 的步驟順序、重試策略與補償關係定義在 Conductor server（預設 `play.orkes.io`），
@@ -126,7 +126,7 @@ flowchart LR
 
 ### 參與者與 task 清單
 
-`WorkflowService` 啟動名為 `FoodDeliveryWorkflow`（version 1）的 workflow
+`WorkflowService` 啟動名為 `FoodDeliveryWorkflow`（version 2）的 workflow
 （`service/WorkflowService.java:24-25`），`correlationId` 固定為 `api-triggered`（`:26`）。
 `ConductorWorkers` 註冊下列 9 個 task：
 
@@ -403,7 +403,7 @@ flowchart LR
 
 ## 待確認問題
 
-1. **Workflow 定義存放位置與版本**：`FoodDeliveryWorkflow`（version 1）定義在哪個 Conductor
+1. **Workflow 定義存放位置與版本**：`FoodDeliveryWorkflow`（version 2）定義在哪個 Conductor
    server／以何種方式註冊？task 順序、重試與補償連結為何？（repo 內無 workflow 定義檔）
 2. **執行環境**：正式試跑應連本機 `conductor-standalone`（README）或 `play.orkes.io`
    （`application.properties` 預設）？兩者不一致（見「部署缺口」）。

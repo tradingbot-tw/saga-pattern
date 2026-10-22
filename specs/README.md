@@ -18,13 +18,13 @@
 | 規格 | 程式碼 |
 |---|---|
 | `taskOk` / `taskFail` / `paymentDeclined` / `paymentInsertFail` / `shipFoodFail` | [`ConductorWorkers.java`](../src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java) 的正向 worker；[`PaymentService.createPayment`](../src/main/java/io/orkes/example/saga/service/PaymentService.java)（先 insert `PENDING`，再改為 `FAILED`/`SUCCESSFUL`）；[`ShipmentService.createShipment`](../src/main/java/io/orkes/example/saga/service/ShipmentService.java)（找不到司機時自行取消；`confirmShipment` 失敗時列停在 `SCHEDULED`） |
-| `FULL_COMPENSATION` / `startFullCompensation` | 現行 [`FoodDeliveryFailureWorkflow.v1.json`](../conductor/workflows/FoodDeliveryFailureWorkflow.v1.json)：`cancel_delivery` → `cancel_payment` → `cancel_order` → `notify_customer_failure_ref`，不看失敗點 |
+| `FULL_COMPENSATION` / `startFullCompensation` | 現行 [`FoodDeliveryFailureWorkflow.v2.json`](../conductor/workflows/FoodDeliveryFailureWorkflow.v2.json)：`cancel_delivery` → `cancel_payment` → `cancel_order` → `notify_customer_failure_ref`，不看失敗點 |
 | `compensationPlan` / `selectCompensation` / `selectDefaultCompensation` | `saga_switch`／`saga_prefix` 專用：舊定義的 `SWITCH.decisionCases` 與 `extract_failure_context` 的 `failedReferenceTaskNames[0]` |
 | `allowMissing` / `compTerminalError` | `cancel_*` worker：現行 workflow 傳 `allowMissing=true`，`UPDATE ... WHERE orderId=?` 影響 0 列時回 `COMPLETED`；其他情況回 `FAILED_WITH_TERMINAL_ERROR` |
 | `compensateEnvFault` | `cancel_*` 遇到 `DataAccessException` 回 `FAILED`，`retryCount: 3` 用完仍失敗，或 task 逾時 |
 | `transientFail` | [`check_inventory.json`](../conductor/taskdefs/check_inventory.json) 的 `retryCount: 3`：失敗的嘗試留在 `tasks[]` |
 | `taskTimeout` | 各 taskdef 的 `timeoutPolicy: TIME_OUT_WF`、`responseTimeoutSeconds: 60` |
-| 現行版的 `orderId` 永遠已知 | [`FoodDeliveryWorkflow.v1.json`](../conductor/workflows/FoodDeliveryWorkflow.v1.json) 把 `orderId: ${workflow.workflowId}` 傳給 `order_food`；`createOrder` 沿用該 id |
+| 現行版的 `orderId` 永遠已知 | [`FoodDeliveryWorkflow.v2.json`](../conductor/workflows/FoodDeliveryWorkflow.v2.json) 把 `orderId: ${workflow.workflowId}` 傳給 `order_food`；`createOrder` 沿用該 id |
 
 Conductor 執行時期的語意依據 conductor-oss 原始碼（commit `4ed6f796`）：
 

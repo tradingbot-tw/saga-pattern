@@ -111,39 +111,24 @@ stateDiagram-v2
 - **`DELIVERED` 目前不可達**：它只存在於 enum；`docs/architecture.md` 的資料模型也將它
   列為未被使用的狀態值。
 
-## 5. 為什麼補償流程不重複呼叫 `cancel_delivery`
+## 5. 補償流程一律呼叫 `cancel_delivery`
 
-`conductor/PROVENANCE.md` §4 的補償對照表（欄位為「失敗的步驟／資料庫留下什麼／補償」）
-對 `ship_food` 的記載是：
+補償 workflow **不看失敗點**，一律依反向順序執行 `cancel_delivery` →
+`cancel_payment` → `cancel_order`，每個都帶 `allowMissing=true`
+（`FoodDeliveryFailureWorkflow.v2.json`）。`createShipment` 的三種失敗情況因此都被涵蓋：
 
-> | `ship_food` | 訂單、付款；出貨失敗時 `ShipmentService` 已自行 `cancelShipment` | `cancel_payment` → `cancel_order`（不重複取消出貨） |
+- **寫入失敗**：外送單根本不存在。`cancel_delivery` 影響 0 列，因 `allowMissing=true`
+  視為 no-op 並回 `COMPLETED`（未帶 `allowMissing` 時才會轉成
+  `FAILED_WITH_TERMINAL_ERROR`）。
+- **找不到司機**：外送單已由 service 自行改成 `CANCELED`。再呼叫一次 `cancel_delivery`
+  會更新 1 列，沒有副作用。
+- **確認失敗（Issue #84）**：INSERT 與司機查詢都成功，但 `confirmShipment` 的 UPDATE
+  失敗，外送單停在 `SCHEDULED`。這是舊設計的已知缺口——舊版 `ship_food_ref` 分支不含
+  `cancel_delivery`，補償後會留下這筆 `SCHEDULED` 出貨單。現行設計一律取消，缺口已補
+  （#139，缺陷 D）。
 
-對照 `FoodDeliveryFailureWorkflow.v1.json` 的 `ship_food_ref` 分支（`:66-83`），補償確實
-只有 `cancel_payment` → `cancel_order`，沒有 `cancel_delivery`。原因要從
-`createShipment` 的兩種失敗情況看：
-
-- **寫入失敗**：外送單根本不存在。若此時排 `cancel_delivery`，`cancelDelivery` 會回傳
-  `0`，worker 依 `cancelDeliveryTask` 的規則轉成
-  `FAILED_WITH_TERMINAL_ERROR`（"No shipment found for order ..."），反而讓補償流程失敗。
-- **找不到司機**：外送單已由 service 自行改成 `CANCELED`。再呼叫 `cancel_delivery`
-  雖然會因為 UPDATE 不檢查狀態而回傳 1、回報 `COMPLETED`，但沒有任何額外效果，只是重複。
-- **確認失敗**：INSERT 與司機查詢都成功，但 `confirmShipment` 的 UPDATE 失敗。
-  外送單已寫入且停在 `SCHEDULED`；service 拋出 `DataAccessException`，worker 回報
-  可重試的 `FAILED`。這個情況不在下面「不存在或 `CANCELED`」的保證內。
-
-因此，在 `ship_food` 對每個 `orderId` 只執行一次的前提下，**既有兩種失敗**的保證是：
-**外送單要嘛不存在，要嘛已經 `CANCELED`**。補償流程可以安全跳過 `cancel_delivery`，
-直接取消付款與訂單。這條保證由 `createShipment` 的「先寫入、再自行取消」維持。
-
-Issue #84 的**確認失敗**則是第三種情況，不在這條保證內：出貨單停在 `SCHEDULED`，
-而 `FoodDeliveryFailureWorkflow` 的 `ship_food_ref` 分支目前仍只呼叫 `cancel_payment`
-→ `cancel_order`，不會取消它；`ship_food` 的 `retryCount` 又是 0，所以補償完成後
-這筆 `SCHEDULED` 出貨單會留在資料庫。這是已知缺口，需由後續工作項決定要讓補償流程
-加回 `cancel_delivery`，或讓 service 在確認失敗時自行取消。
-
-`cancel_delivery` 仍用於 `notify_driver_ref`／`notify_customer_ref` 失敗的分支
-（`FoodDeliveryFailureWorkflow.v1.json:84-135`）：那時 `ship_food` 已成功，外送單確實
-存在（通常為 `CONFIRMED`），才需要補償取消。
+因此 `ship_food` 不需要自己清理，補償 workflow 也不必判斷失敗種類；代價是「寫入失敗」
+路徑會多一筆 no-op 的 `cancel_delivery` 呼叫。
 
 `ship_food` worker 的接縫（`ConductorWorkers.java:95-114`）：`createShipment` 回傳非 0
 → `COMPLETED` 且 output 帶 `driverId`；回傳 0 → `FAILED`，不輸出 `driverId`；

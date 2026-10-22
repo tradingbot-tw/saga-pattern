@@ -17,8 +17,8 @@
 | `CheckInventoryRequest` | `src/main/java/io/orkes/example/saga/pojos/CheckInventoryRequest.java` | `check_inventory` worker 的輸入 DTO：`restaurantId`、`items` |
 | `ConductorWorkers.checkInventoryTask` | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:44-60` | 把 service 的 boolean 轉成 Conductor task 狀態 |
 | `check_inventory` TaskDef | `conductor/taskdefs/check_inventory.json` | task 名稱、重試與 timeout 設定 |
-| `FoodDeliveryWorkflow` | `conductor/workflows/FoodDeliveryWorkflow.v1.json:39-47` | 把 workflow 輸入映射成 `restaurantId`／`items` |
-| `FoodDeliveryFailureWorkflow` | `conductor/workflows/FoodDeliveryFailureWorkflow.v1.json:37-47` | `check_inventory_ref` 失敗時的補償分支 |
+| `FoodDeliveryWorkflow` | `conductor/workflows/FoodDeliveryWorkflow.v2.json:40-48` | 把 workflow 輸入映射成 `restaurantId`／`items` |
+| `FoodDeliveryFailureWorkflow` | `conductor/workflows/FoodDeliveryFailureWorkflow.v2.json:28-64` | 一律反向取消（`cancel_delivery` → `cancel_payment` → `cancel_order`，皆 `allowMissing=true`） |
 
 `factory/process.yaml:22-32` 把 inventory 模組的範圍列為
 `InventoryService`、`InventoryDAO`、`CheckInventoryRequest`、`FoodDeliveryRequest`。
@@ -148,22 +148,25 @@ SELECT name, address, contact FROM restaurants WHERE id = ?
 
 ### 4.2 workflow 中的位置與補償
 
-`conductor/workflows/FoodDeliveryWorkflow.v1.json:39-47` 把 workflow 輸入
+`conductor/workflows/FoodDeliveryWorkflow.v2.json:40-48` 把 workflow 輸入
 `restaurantId` 與 `foodItems` 映射到 `check_inventory` 的 `restaurantId` 與 `items`。
 `check_inventory` 是唯讀步驟，本身沒有庫存副作用，因此**沒有專屬的補償動作**。
 
-`FoodDeliveryFailureWorkflow.v1.json` 的 `switch_compensate_from` 針對
-`check_inventory_ref` 失敗只執行 `cancel_order`（`:37-47`）：此時前一個 `order_food`
-已建立訂單，但庫存檢查沒有留下任何需要回滾的資料。
-
-失敗流程（依版控內的定義檔）：
+`FoodDeliveryFailureWorkflow.v2.json` 不看失敗點，一律依反向順序執行
+`cancel_delivery` → `cancel_payment` → `cancel_order`，每個都帶 `allowMissing=true`。
+`check_inventory` 失敗時只有 `order_food` 留下的訂單需要取消，前兩步影響 0 列而成為 no-op：
 
 ```
 check_inventory 回 FAILED_WITH_TERMINAL_ERROR
   → FoodDeliveryFailureWorkflow
-  → switch_compensate_from 的 check_inventory_ref 分支
-  → cancel_order
+  → cancel_delivery（沒有出貨單 → no-op）
+  → cancel_payment（沒有付款 → no-op）
+  → cancel_order（訂單 PENDING → CANCELLED）
+  → notify_customer
 ```
+
+補償 workflow 的 `orderId` 取自失敗主 workflow 的 `output.orderId`
+（`order_food` 以 `${workflow.workflowId}` 建立訂單），不需要知道是哪個 task 失敗。
 
 ## 5. 現有測試各保護哪一行為
 
@@ -258,8 +261,8 @@ Issue #85 的空白名稱案例會以隨機 id 插入一列、於 `finally` 刪�
 | 變更 | 必須同步更新 |
 | --- | --- |
 | 改變「餐廳可用」的判斷（例如 trim、檢查營業狀態） | `InventoryService`、`InventoryServiceTest`、本文件 |
-| 真正使用 `items` 做數量／品項檢查 | `InventoryDAO`、資料表 DDL（`BaseDAO`）、`CheckInventoryRequest`／`FoodItem`、`ConductorWorkers.checkInventoryTask` 的狀態語意、`conductor/taskdefs/check_inventory.json` 的 `outputKeys`、`conductor/workflows/FoodDeliveryWorkflow.v1.json` 的輸入映射、`WorkflowDefinitionContractTest`、`InventoryServiceTest`、`InventoryDAOTest`、`docs/architecture.md`、`conductor/PROVENANCE.md` |
-| 改變失敗狀態（例如把 DB 錯誤改成可重試的 `FAILED`） | worker、`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json` 的補償分支、`ConductorWorkersTest`、本文件 |
+| 真正使用 `items` 做數量／品項檢查 | `InventoryDAO`、資料表 DDL（`BaseDAO`）、`CheckInventoryRequest`／`FoodItem`、`ConductorWorkers.checkInventoryTask` 的狀態語意、`conductor/taskdefs/check_inventory.json` 的 `outputKeys`、`conductor/workflows/FoodDeliveryWorkflow.v2.json` 的輸入映射、`WorkflowDefinitionContractTest`、`InventoryServiceTest`、`InventoryDAOTest`、`docs/architecture.md`、`conductor/PROVENANCE.md` |
+| 改變失敗狀態（例如把 DB 錯誤改成可重試的 `FAILED`） | worker、`conductor/workflows/FoodDeliveryFailureWorkflow.v2.json` 的補償分支、`ConductorWorkersTest`、本文件 |
 
 Issue #70 的範圍**只新增本文件**，沒有修改上述程式、測試或 `conductor/**`。
 Issue #85 則修改了 `InventoryService` 的名稱判斷式、`InventoryServiceTest` 與本文件的
@@ -294,8 +297,8 @@ grep -n "check_inventory" conductor/workflows/*.json conductor/taskdefs/*.json
 | 連線例外包裝 | `dao/BaseDAO.java:14-25` |
 | worker 狀態映射 | `workers/ConductorWorkers.java:44-60` |
 | `check_inventory` TaskDef | `conductor/taskdefs/check_inventory.json` |
-| 主 workflow 的 inventory 步驟 | `conductor/workflows/FoodDeliveryWorkflow.v1.json:39-47` |
-| 失敗 workflow 的 inventory 補償分支 | `conductor/workflows/FoodDeliveryFailureWorkflow.v1.json:37-47` |
+| 主 workflow 的 inventory 步驟 | `conductor/workflows/FoodDeliveryWorkflow.v2.json:40-48` |
+| 失敗 workflow 的反向取消 | `conductor/workflows/FoodDeliveryFailureWorkflow.v2.json:28-64` |
 | 模組清單與 readiness | `factory/process.yaml:22-32` |
 | 現有測試 | `src/test/java/io/orkes/example/saga/service/InventoryServiceTest.java`、`src/test/java/io/orkes/example/saga/dao/InventoryDAOTest.java` |
 
