@@ -7,6 +7,7 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -89,6 +90,35 @@ class OrdersDAOTest {
         assertEquals(1, SagaTestDb.count(url,
                 "SELECT COUNT(*) FROM orders_details WHERE orderId = '" + orderId + "'"),
                 "明細應寫入 orders_details");
+    }
+
+    @Test
+    @Disabled("Issue #86：交易修復前紅燈；02-impl 移除 @Disabled")
+    @DisplayName("交易回滾：orders_details 寫入失敗時，該 orderId 在 orders／orders_details 都不得留列")
+    void insertOrderRollsBackOrderWhenDetailsInsertFails() throws Exception {
+        String orderId = SagaTestDb.uniqueId("tx-order");
+        Order order = pendingOrder(orderId);
+
+        // 故障注入：只讓 orders_details 的 INSERT 失敗，orders 的 INSERT 仍會成功。
+        SagaTestDb.execute(url, "DROP TRIGGER IF EXISTS fail_orders_details_insert");
+        SagaTestDb.execute(url,
+                "CREATE TRIGGER fail_orders_details_insert BEFORE INSERT ON orders_details "
+                        + "BEGIN SELECT RAISE(ABORT, 'simulated orders_details failure'); END");
+        String error;
+        try {
+            error = dao.insertOrder(order);
+        } finally {
+            SagaTestDb.execute(url, "DROP TRIGGER IF EXISTS fail_orders_details_insert");
+        }
+
+        assertNotNull(error);
+        assertFalse(error.isEmpty(), "明細寫入失敗時 insertOrder 應回傳非空錯誤訊息");
+        assertEquals(0, SagaTestDb.count(url,
+                        "SELECT COUNT(*) FROM orders WHERE orderId = '" + orderId + "'"),
+                "orders 的 INSERT 必須被 rollback，不得留下半成品訂單");
+        assertEquals(0, SagaTestDb.count(url,
+                        "SELECT COUNT(*) FROM orders_details WHERE orderId = '" + orderId + "'"),
+                "orders_details 不得留下任何列");
     }
 
     @Test

@@ -87,6 +87,14 @@ public final class SagaTestDb {
         }
     }
 
+    /** 執行 DDL／DML（例如建立故障注入用的 TRIGGER），以 autocommit 立即生效。 */
+    public static void execute(String url, String sql) throws SQLException {
+        try (Connection conn = DriverManager.getConnection(url);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
+    }
+
     /** 產生測試用 id，確保跨測試不互相干擾。 */
     public static String uniqueId(String prefix) {
         return prefix + "-" + UUID.randomUUID();

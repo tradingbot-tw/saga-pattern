@@ -5,6 +5,7 @@ import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -109,6 +110,39 @@ class OrderServiceTest {
 
         assertNull(orderId, "寫入失敗必須回傳 null，讓協調器把 order_food 轉成 FAILED");
         assertEquals(0, orderCountForCustomer(email), "寫入失敗不得留下任何訂單列");
+    }
+
+    @Test
+    @Disabled("Issue #86：交易修復前紅燈；02-impl 移除 @Disabled")
+    @DisplayName("AC-4 交易回滾：orders_details 寫入失敗 → createOrder 回傳 null 且不留下訂單列")
+    void createOrderRollsBackOrderWhenOrderDetailsWriteFails() throws Exception {
+        String email = SagaTestDb.uniqueId("rollback") + "@example.com";
+
+        // 以 SQLite TRIGGER 讓 orders_details 的 INSERT 失敗，注入「第一筆成功、第二筆失敗」的情境。
+        SagaTestDb.execute(URL, "DROP TRIGGER IF EXISTS fail_orders_details_insert");
+        SagaTestDb.execute(URL,
+                "CREATE TRIGGER fail_orders_details_insert BEFORE INSERT ON orders_details "
+                        + "BEGIN SELECT RAISE(ABORT, 'simulated orders_details failure'); END");
+        try {
+            assertNull(OrderService.createOrder(
+                            request(email, "43 West 4th Street, New York NY 10024")),
+                    "明細寫入失敗時 createOrder 必須回傳 null");
+        } finally {
+            SagaTestDb.execute(URL, "DROP TRIGGER IF EXISTS fail_orders_details_insert");
+        }
+
+        // 客戶列在訂單交易之外，仍會寫入（Issue #86 不處理 customerId 落庫問題）。
+        String customerId = SagaTestDb.queryString(URL,
+                "SELECT id FROM customers WHERE email = '" + email + "'");
+        assertNotNull(customerId, "交易只涵蓋 orders／orders_details，客戶列應已寫入");
+
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM orders WHERE customerId = " + customerId),
+                "orders_details 失敗時 orders 列必須被回滾，不得留下半成品訂單");
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM orders_details WHERE orderId IN "
+                                + "(SELECT orderId FROM orders WHERE customerId = " + customerId + ")"),
+                "orders_details 不得留下任何屬於該訂單的列");
     }
 
     @Test
