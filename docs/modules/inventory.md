@@ -1,11 +1,12 @@
 # inventory 模組：庫存檢查
 
-> 本文件描述 **現行實作**，對應 Issue #70。最後核對的程式碼基準為
-> `software-factory` 的 `975bb43`（2026-10-21）。
+> 本文件描述 **現行實作**，對應 Issue #70；名稱判斷語意已依 Issue #85 更新。
+> 最後核對的程式碼基準為 `software-factory` 的 `975bb43`（2026-10-21）與 Issue #85 的變更。
 >
 > 一句話：`InventoryService.checkAvailability` **不是庫存數量檢查**，而是
-> 「餐廳是否存在」檢查——只讀 `restaurants.name`，名稱不是空字串就視為可用；
-> 傳入的 `items` 完全沒有被讀取。這個模組沒有庫存表、沒有數量、沒有保留或扣減。
+> 「餐廳是否存在」檢查——只讀 `restaurants.name`，名稱非 `NULL` 且 `trim()` 後非空
+> 才視為可用；傳入的 `items` 完全沒有被讀取。這個模組沒有庫存表、沒有數量、
+> 沒有保留或扣減。
 
 ## 1. 模組邊界與位置
 
@@ -26,7 +27,7 @@
 
 ## 2. `checkAvailability` 的實際判斷邏輯
 
-`src/main/java/io/orkes/example/saga/service/InventoryService.java:14-22`：
+`src/main/java/io/orkes/example/saga/service/InventoryService.java:14-31`：
 
 ```java
 private static final InventoryDAO inventoryDAO =
@@ -37,7 +38,11 @@ public static boolean checkAvailability(int restaurantId, ArrayList<FoodItem> it
     restaurant.setId(restaurantId);
     restaurant.setName("");
     inventoryDAO.readRestaurant(restaurantId, restaurant);
-    return !Objects.equals(restaurant.getName(), "");
+    return isUsableRestaurantName(restaurant.getName());
+}
+
+static boolean isUsableRestaurantName(String name) {
+    return name != null && !name.isBlank();
 }
 ```
 
@@ -46,7 +51,8 @@ public static boolean checkAvailability(int restaurantId, ArrayList<FoodItem> it
 1. 建立一個空的 `Restaurant`，只設定 `id = restaurantId`。
 2. **先把 `name` 設為空字串 `""`**，作為「查無資料」的哨兵值。
 3. 呼叫 `inventoryDAO.readRestaurant(restaurantId, restaurant)` 回填資料。
-4. 以 `!Objects.equals(restaurant.getName(), "")` 判斷：名稱不等於空字串就回 `true`。
+4. 以 `isUsableRestaurantName(name)` 判斷：名稱**非 `NULL`** 且 **`trim()` 後非空**
+   才回 `true`（`String.isBlank()` 對空字串與純空白都回 `true`）。
 
 ### 2.1 判斷結果一覽
 
@@ -55,12 +61,13 @@ public static boolean checkAvailability(int restaurantId, ArrayList<FoodItem> it
 | `restaurants` 沒有該 `id` | `""`（步驟 2 的預設值） | `false` | DAO 不會覆寫，名稱維持空字串 |
 | 有該 `id`，`name = 'Mikes'` | `"Mikes"` | `true` | 一般種子餐廳 |
 | 有該 `id`，`name = ''` | `""` | `false` | 名稱是空字串，被視為不存在 |
-| 有該 `id`，`name = '   '` | `"   "` | `true` | **只比對空字串，沒有 `trim()`／`isBlank()`** |
-| 有該 `id`，`name = NULL` | `null` | `true` | `Objects.equals(null, "")` 為 `false`；但 DDL 是 `name text NOT NULL`，正常寫入不會發生 |
+| 有該 `id`，`name = '   '` | `"   "` | `false` | `isBlank()` 成立，視為不可用（Issue #85） |
+| 有該 `id`，`name = NULL` | `null` | `false` | `name != null` 先擋掉；但 DDL 是 `name text NOT NULL`，正常寫入不會發生 |
 | 查詢發生 `SQLException` | 通常是 `""`（尚未回填） | `false` | DAO 吞掉例外、只印訊息，service 無法區分「查詢失敗」與「查無餐廳」 |
 
-> **「非空白」不是精確描述。** 程式比對的是「不等於空字串」，不是「`trim()` 後非空」。
-> 只有空白的名稱會通過。若未來要改成真正的「非空白」，必須同步修改這裡與測試。
+> **NULL 的驗證方式。** 因 `restaurants.name` 是 `text NOT NULL`，無法用資料列製造
+> `NULL`，`InventoryServiceTest` 直接對 `isUsableRestaurantName(null)` 斷言 `false`
+> （Issue #85 允許的替代驗證方式）。空白名稱則以實際資料列驗證。
 
 ### 2.2 `items` 參數目前的狀態：完全未使用
 
@@ -136,8 +143,8 @@ SELECT name, address, contact FROM restaurants WHERE id = ?
 `check_inventory` 沒有成功 output，TaskDef 的 `outputKeys` 也是空陣列，兩者一致。
 
 > `"Restaurant is closed"` 是**硬編碼的固定原因**，不是從資料庫或例外取得的診斷資訊。
-> 查無 id、名稱為空字串、SQL 執行失敗都可能產生這個原因；不應把它解讀成
-> 「餐廳存在但打烊」。
+> 查無 id、名稱為空字串／只有空白／`NULL`、SQL 執行失敗都可能產生這個原因；
+> 不應把它解讀成「餐廳存在但打烊」。
 
 ### 4.2 workflow 中的位置與補償
 
@@ -165,17 +172,20 @@ check_inventory 回 FAILED_WITH_TERMINAL_ERROR
 `src/test/java/io/orkes/example/saga/service/InventoryServiceTest.java`
 
 此測試使用 `SagaTestDb.createAppSchema()` 準備 `jdbc:sqlite:food_delivery.db`
-（service 把連線字串寫死，無法注入），測試案例本身只讀不寫；種子餐廳為 id 1..3。
+（service 把連線字串寫死，無法注入）；種子餐廳為 id 1..3。多數案例只讀，
+Issue #85 的空白名稱案例會以隨機 id 插入一列、於 `finally` 刪除。
 
 | 測試方法 | 保護的行為 |
 | --- | --- |
-| `checkAvailabilityReturnsTrueForSeededRestaurant`（`:38`） | 存在的種子餐廳（id 1）回 `true` |
-| `checkAvailabilityReturnsTrueForEverySeededRestaurant`（`:44`） | 三個種子餐廳（id 1..3）都存在且都可回 `true` |
-| `checkAvailabilityReturnsFalseForUnknownRestaurant`（`:53`） | 不存在的 id 999 回 `false`，這是 worker 轉終端錯誤的訊號 |
-| `checkAvailabilityReturnsFalseForNonPositiveIds`（`:59`） | id `0` 與負數都不存在，回 `false` |
-| `emptyItemListDoesNotAffectAvailability`（`:66`） | 空 `items` 不影響結果，存在餐廳仍回 `true` |
-| `nullItemListDoesNotAffectAvailability`（`:73`） | `items = null` 不會 NPE，存在餐廳仍回 `true` |
-| `itemListDoesNotMakeUnknownRestaurantAvailable`（`:80`） | `items` 不能讓不存在的餐廳變成可用，仍回 `false` |
+| `checkAvailabilityReturnsTrueForSeededRestaurant`（`:43`） | 存在的種子餐廳（id 1）回 `true` |
+| `checkAvailabilityReturnsTrueForEverySeededRestaurant`（`:49`） | 三個種子餐廳（id 1..3）都存在且都可回 `true` |
+| `checkAvailabilityReturnsFalseForUnknownRestaurant`（`:58`） | 不存在的 id 999 回 `false`，這是 worker 轉終端錯誤的訊號 |
+| `checkAvailabilityReturnsFalseForNonPositiveIds`（`:64`） | id `0` 與負數都不存在，回 `false` |
+| `emptyItemListDoesNotAffectAvailability`（`:71`） | 空 `items` 不影響結果，存在餐廳仍回 `true` |
+| `nullItemListDoesNotAffectAvailability`（`:78`） | `items = null` 不會 NPE，存在餐廳仍回 `true` |
+| `itemListDoesNotMakeUnknownRestaurantAvailable`（`:85`） | `items` 不能讓不存在的餐廳變成可用，仍回 `false` |
+| `checkAvailabilityReturnsFalseForWhitespaceOnlyRestaurantName`（`:91`） | 資料列 `name = '   '` → `false`（Issue #85） |
+| `isUsableRestaurantNameRejectsNullAndBlankNames`（`:118`） | 判斷式對 `null`／空字串／純空白回 `false`，對非空名稱回 `true`（Issue #85） |
 
 ### 5.2 `InventoryDAOTest`
 
@@ -202,8 +212,7 @@ check_inventory 回 FAILED_WITH_TERMINAL_ERROR
 
 ### 5.4 測試沒有覆蓋的邊界
 
-- 名稱只有空白（`"   "`）時會回 `true`。
-- 名稱為 `NULL` 時會回 `true`（正常 DDL 下不會發生）。
+- 名稱只有空白、名稱為 `NULL` 的情境已由 Issue #85 的測試覆蓋（見 §5.1）。
 - `SQLException` 被吞掉後回 `false` 的路徑。
 - 資料庫連線失敗時 `DataAccessException` 往外的路徑。
 - `items` 的數量、品項內容、售完狀態——因為這些功能尚未實作。
@@ -213,9 +222,12 @@ check_inventory 回 FAILED_WITH_TERMINAL_ERROR
 1. **不是真正的庫存檢查。** 沒有 `inventory`／`stock` 資料表，沒有數量欄位，
    沒有保留、扣減或回補。`foodItems` 的數量與品項售完都不影響結果。
    若要實作，必須同時處理資料模型、併發與 Saga 補償，不能只改這一個方法。
-2. **只判斷「名稱不是空字串」，不是「餐廳營業中」。** 無法區分不存在、名稱為空、
-   打烊、暫停營業或資料錯誤；worker 一律回報 `"Restaurant is closed"`。
-3. **空白名稱會通過。** 判斷式是 `!Objects.equals(name, "")`，沒有 `trim()`／`isBlank()`。
+2. **只判斷「名稱可用」，不是「餐廳營業中」。** 判斷式是名稱非 `NULL` 且 `isBlank()`
+   為 `false`；無法區分不存在、名稱為空、打烊、暫停營業或資料錯誤；
+   worker 一律回報 `"Restaurant is closed"`。
+3. **`NULL` 名稱僅以判斷式驗證。** `restaurants.name` 的 DDL 是 `text NOT NULL`，
+   正常寫入不會產生 `NULL`；Issue #85 以 `isUsableRestaurantName(null)` 直接固定
+   這個邊界，沒有實際資料列的端到端案例。
 4. **SQL 例外被吞掉。** `InventoryDAO.readRestaurant` 只印 stdout 後返回，
    service 會把「查詢失敗」誤判成「餐廳不存在」，worker 因此回終端錯誤而不是可重試的
    `FAILED`。連線失敗則丟 `DataAccessException`，行為與前者不同。
@@ -250,10 +262,12 @@ check_inventory 回 FAILED_WITH_TERMINAL_ERROR
 | 改變失敗狀態（例如把 DB 錯誤改成可重試的 `FAILED`） | worker、`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json` 的補償分支、`ConductorWorkersTest`、本文件 |
 
 Issue #70 的範圍**只新增本文件**，沒有修改上述程式、測試或 `conductor/**`。
+Issue #85 則修改了 `InventoryService` 的名稱判斷式、`InventoryServiceTest` 與本文件的
+相關段落。
 
 ## 8. 驗證方式
 
-本文件是唯讀文件變更，驗證命令與 CI 相同：
+變更名稱判斷後，驗證命令與 CI 相同：
 
 ```bash
 export JAVA_HOME=/usr/lib/jvm/temurin-17-jdk-amd64
@@ -261,7 +275,8 @@ export PATH="$JAVA_HOME/bin:$PATH"
 ./gradlew test --no-daemon
 ```
 
-預期結果與變更前相同（文件不影響測試）。若要核對本文件描述的靜態事實：
+預期結果：全部測試綠燈，包含 Issue #85 新增的空白名稱與 `NULL` 判斷式案例。若要核對
+本文件描述的靜態事實：
 
 ```bash
 grep -n "checkAvailability\|readRestaurant" \
@@ -274,7 +289,7 @@ grep -n "check_inventory" conductor/workflows/*.json conductor/taskdefs/*.json
 
 | 主題 | 位置 |
 | --- | --- |
-| `checkAvailability` 實作 | `service/InventoryService.java:14-22` |
+| `checkAvailability` 實作 | `service/InventoryService.java:14-31` |
 | `readRestaurant` 實作 | `dao/InventoryDAO.java:17-32` |
 | 連線例外包裝 | `dao/BaseDAO.java:14-25` |
 | worker 狀態映射 | `workers/ConductorWorkers.java:44-60` |
