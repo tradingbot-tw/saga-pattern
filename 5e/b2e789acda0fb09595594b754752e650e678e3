@@ -1,0 +1,20 @@
+build.gradle
+  h_a7614621effce7 26-27
+specs/README.md
+  h_a7614621effce7 74-91
+src/test/java/io/orkes/example/saga/workers/FailureWorkflowHarness.java
+  h_a7614621effce7 1-212
+src/test/java/io/orkes/example/saga/workers/SagaCompensationDefectTest.java
+  h_a7614621effce7 1-328
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5eb2e789acda0fb09595594b754752e650e678e3",
+  "prompts": {},
+  "humans": {
+    "h_a7614621effce7": {
+      "author": "tradingbot-tw <tradingbot.tw@gmail.com>"
+    }
+  }
+}
