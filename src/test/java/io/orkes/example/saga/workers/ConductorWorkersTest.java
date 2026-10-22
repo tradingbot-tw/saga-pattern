@@ -18,7 +18,6 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -204,7 +203,6 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @Disabled("Issue #84：修復前 worker 看不到 confirmShipment 的失敗，02-impl 會 un-skip")
     @DisplayName("重試語義：ship_food 確認出貨失敗時回傳 FAILED（可重試）、帶原因且不輸出 driverId")
     void shipFoodFailsRetryablyWhenConfirmFails() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");

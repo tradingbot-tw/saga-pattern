@@ -87,18 +87,28 @@ public class ConductorWorkers {
      * <p>成功時 output 帶 {@code driverId}，讓下游 {@code notify_driver} 的
      * {@link DriverNotificationRequest#getDriverId()} 有生產者；失敗時不輸出
      * {@code driverId}，狀態維持 {@code FAILED} 由 Conductor retry policy 接管。
+     *
+     * <p>確認出貨失敗時 {@link ShipmentService} 會拋出 {@link DataAccessException}；
+     * 這裡轉成可重試的 {@code FAILED} 並把原因寫進 {@code reasonForIncompletion}
+     * （Issue #84），不得讓 worker 在出貨單仍停在 {@code SCHEDULED} 時回報成功。
      */
     @WorkerTask(value = "ship_food", threadCount = 2, pollingInterval = 300)
     public TaskResult shipFoodTask(ShippingRequest shippingRequest) {
         TaskResult result = new TaskResult();
         Map<String, Object> output = new HashMap<>();
-        int driverId = ShipmentService.createShipment(shippingRequest);
-        if (driverId != 0) {
-            output.put("driverId", driverId);
-            result.setOutputData(output);
-            result.setStatus(TaskResult.Status.COMPLETED);
-        } else {
-            result.setStatus(TaskResult.Status.FAILED);
+        try {
+            int driverId = ShipmentService.createShipment(shippingRequest);
+            if (driverId != 0) {
+                output.put("driverId", driverId);
+                result.setOutputData(output);
+                result.setStatus(TaskResult.Status.COMPLETED);
+            } else {
+                result.setStatus(TaskResult.Status.FAILED);
+            }
+        } catch (DataAccessException e) {
+            return failed(TaskResult.Status.FAILED,
+                    "Failed to create shipment for order " + shippingRequest.getOrderId()
+                            + ": " + e.getMessage());
         }
         return result;
     }

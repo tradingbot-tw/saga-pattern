@@ -6,7 +6,6 @@ import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.Shipment;
 import io.orkes.example.saga.pojos.ShippingRequest;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -155,7 +154,6 @@ class ShipmentServiceTest {
     }
 
     @Test
-    @Disabled("Issue #84：修復前 confirmShipment 吞掉 SQLException，02-impl 會 un-skip")
     @DisplayName("確認失敗：confirmShipment 的 UPDATE 失敗時 createShipment 拋出 DataAccessException，且 DB 不得停在 CONFIRMED")
     void createShipmentPropagatesWhenConfirmFails() throws SQLException {
         String orderId = SagaTestDb.uniqueId("order");
@@ -180,7 +178,6 @@ class ShipmentServiceTest {
     }
 
     @Test
-    @Disabled("Issue #84：修復前 confirmShipment 忽略受影響列數，02-impl 會 un-skip")
     @DisplayName("確認失敗：confirmShipment 未更新任何列時 createShipment 仍須拋出 DataAccessException")
     void createShipmentPropagatesWhenConfirmUpdatesNoRows() throws SQLException {
         String orderId = SagaTestDb.uniqueId("order");
