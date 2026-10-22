@@ -74,6 +74,8 @@ class WorkflowDefinitionContractTest {
             Pattern.compile("([A-Za-z_][A-Za-z0-9_]*)\\.output\\.([A-Za-z_][A-Za-z0-9_]*)(\\.[A-Za-z_][A-Za-z0-9_]*)*");
     private static final Pattern TASK_OUTPUT_WHOLE_REF =
             Pattern.compile("([A-Za-z_][A-Za-z0-9_]*)\\.output");
+    /** Conductor 執行期提供的 workflow 屬性，不是起始輸入。 */
+    private static final Set<String> WORKFLOW_BUILTINS = Set.of("workflow.workflowId");
 
     /** 由 {@link #findRepoRoot()} 載入的定義檔與程式碼端事实，{@link #setUp()} 一次建妥。 */
     private static Path repoRoot;
@@ -340,6 +342,10 @@ class WorkflowDefinitionContractTest {
             }
             Map<String, JsonNode> refs = refIndex(root);
             for (String expr : collectExpressions(root)) {
+                if (WORKFLOW_BUILTINS.contains(expr)) {
+                    // Conductor 內建的 workflow 屬性（例如 order_food 以 workflowId 當 orderId，#137）
+                    continue;
+                }
                 Matcher input = WORKFLOW_INPUT_REF.matcher(expr);
                 if (input.matches()) {
                     String key = input.group(1);

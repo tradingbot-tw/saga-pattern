@@ -35,17 +35,18 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * 重現 Quint 規格（specs/saga.qnt）在現行補償 workflow 找到的反例 A–D。
+ * 以 Quint 規格（specs/saga.qnt）找到的反例 A–D（#136–#139）驗證補償 workflow。
  *
- * <p>每個反例對應 specs/saga_test.qnt 中同名的 {@code defect_*} 情境：
+ * <p>每個情境對應 specs/saga_test.qnt 中的 {@code current_*}（修正後）與 {@code defect_*}（SWITCH 版反例）：
  * 正向步驟呼叫真實的 worker 寫入 SQLite；需要的資料庫錯誤以 SQLite trigger 注入到真實程式碼路徑；
  * Conductor 的行為（重試、逾時、JOIN 競態）以 {@link Workflow}／{@link Task} 的執行紀錄表達；
  * 補償 workflow 由 {@link FailureWorkflowHarness} 照版控中的 JSON 執行。
  *
- * <p><b>defect 測試斷言的是正確的 Saga 一致性</b>（補償後不殘留生效中的訂單、付款、出貨單），
- * 因此在缺陷修正前會失敗；失敗訊息會附上補償 workflow 實際選到的 SWITCH 分支。
- * {@code control_*} 測試是對照組：同一套 harness 在現行 workflow 能正確處理的情境下應通過，
- * 用來確認紅燈來自缺陷，而不是 harness 本身。
+ * <p>每個測試都斷言正確的 Saga 一致性（補償後不殘留生效中的訂單、付款、出貨單）。
+ * 在 SWITCH 版補償 workflow 下，{@code defect*} 這 4 個測試都會失敗；
+ * 現行補償 workflow 不看失敗點、一律反向取消（{@code allowMissing=true}），全部通過。
+ *
+ * <p>orderId 與正式環境相同：主 workflow 把 {@code ${workflow.workflowId}} 傳給 {@code order_food} 當訂單 id。
  */
 class SagaCompensationDefectTest {
 
@@ -76,14 +77,14 @@ class SagaCompensationDefectTest {
     }
 
     // ==================================================================
-    // 對照組：現行 workflow 能正確補償
+    // 一般失敗路徑
     // ==================================================================
 
     @Test
-    @DisplayName("對照組：notify_driver 失敗（JOIN 正常被取消）→ 取消出貨、付款、訂單")
+    @DisplayName("一般：notify_driver 失敗（JOIN 正常被取消）→ 取消出貨、付款、訂單")
     void control_notifyDriverFailureCompensatesEverything() throws Exception {
         Forward f = runForwardUntilShipped();
-        JsonNode failed = failedWorkflow(Workflow.WorkflowStatus.FAILED, List.of(
+        JsonNode failed = failedWorkflow(f.workflowId, Workflow.WorkflowStatus.FAILED, List.of(
                 f.orderTask, f.inventoryTask, f.paymentTask, f.shipTask,
                 task("notify_fork_ref", Task.Status.COMPLETED),
                 task("notify_driver_ref", Task.Status.FAILED),
@@ -92,80 +93,108 @@ class SagaCompensationDefectTest {
 
         FailureWorkflowHarness.Run run = failureWorkflow.run(failed, f.email, CUSTOMER_NAME);
 
-        assertEquals("notify_driver_ref", run.switchKey(), run.toString());
-        assertNothingLeft(f.orderId, run);
+        assertNothingLeft(f.workflowId, run);
     }
 
     @Test
-    @DisplayName("對照組：ship_food 失敗（insertShipment 失敗）→ 取消付款、訂單")
+    @DisplayName("一般：ship_food 失敗（insertShipment 失敗，沒有出貨單）→ 取消付款、訂單，cancel_delivery 為 no-op")
     void control_shipFoodFailureCompensatesPaymentAndOrder() throws Exception {
         Forward f = runForwardUntilPaid();
-        failNextShipmentInsert(f.orderId);
-        Task shipTask = shipFood(f.orderId, TaskResult.Status.FAILED);
+        failNextShipmentInsert(f.workflowId);
+        Task shipTask = shipFood(f.workflowId, TaskResult.Status.FAILED);
 
-        JsonNode failed = failedWorkflow(Workflow.WorkflowStatus.FAILED, List.of(
+        JsonNode failed = failedWorkflow(f.workflowId, Workflow.WorkflowStatus.FAILED, List.of(
                 f.orderTask, f.inventoryTask, f.paymentTask, shipTask));
         FailureWorkflowHarness.Run run = failureWorkflow.run(failed, f.email, CUSTOMER_NAME);
 
-        assertEquals("ship_food_ref", run.switchKey(), run.toString());
-        assertNothingLeft(f.orderId, run);
+        assertNothingLeft(f.workflowId, run);
+    }
+
+    @Test
+    @DisplayName("一般：check_inventory 失敗 → 取消訂單，其餘 cancel 為 no-op")
+    void control_inventoryFailureCancelsOrder() throws Exception {
+        String workflowId = SagaTestDb.uniqueId("wf");
+        String email = workflowId + "@example.com";
+        Task orderTask = orderFood(workflowId, email);
+        Task inventoryTask = task("check_inventory_ref", Task.Status.FAILED_WITH_TERMINAL_ERROR);
+
+        JsonNode failed = failedWorkflow(workflowId, Workflow.WorkflowStatus.FAILED,
+                List.of(orderTask, inventoryTask));
+        FailureWorkflowHarness.Run run = failureWorkflow.run(failed, email, CUSTOMER_NAME);
+
+        assertNothingLeft(workflowId, run);
     }
 
     // ==================================================================
-    // 反例 A：重試留下的失敗紀錄讓 SWITCH 選錯分支
+    // 反例 A（#136）：重試留下的失敗紀錄讓 SWITCH 選錯分支
     // ==================================================================
 
     @Test
-    @DisplayName("缺陷 A：check_inventory 重試成功後 ship_food 失敗，補償應取消付款與訂單")
+    @DisplayName("缺陷 A（#136）：check_inventory 重試成功後 ship_food 失敗，補償應取消付款與訂單")
     void defectA_retriedCheckInventoryMakesSwitchPickWrongBranch() throws Exception {
-        String email = SagaTestDb.uniqueId("defect-a") + "@example.com";
-        Task orderTask = orderFood(email);
-        String orderId = orderIdOf(orderTask);
+        String workflowId = SagaTestDb.uniqueId("wf-a");
+        String email = workflowId + "@example.com";
+        Task orderTask = orderFood(workflowId, email);
         // 第一次嘗試因暫時性錯誤 FAILED（worker 例外 → SDK 回報 FAILED），Conductor 依 retryCount 3 重試
         Task inventoryAttempt1 = retriedFailure("check_inventory_ref");
         Task inventoryAttempt2 = checkInventory();
-        Task paymentTask = makePayment(orderId);
-        failNextShipmentInsert(orderId);
-        Task shipTask = shipFood(orderId, TaskResult.Status.FAILED);
+        Task paymentTask = makePayment(workflowId);
+        failNextShipmentInsert(workflowId);
+        Task shipTask = shipFood(workflowId, TaskResult.Status.FAILED);
 
-        JsonNode failed = failedWorkflow(Workflow.WorkflowStatus.FAILED, List.of(
+        JsonNode failed = failedWorkflow(workflowId, Workflow.WorkflowStatus.FAILED, List.of(
                 orderTask, inventoryAttempt1, inventoryAttempt2, paymentTask, shipTask));
         FailureWorkflowHarness.Run run = failureWorkflow.run(failed, email, CUSTOMER_NAME);
 
-        assertNothingLeft(orderId, run);
+        assertNothingLeft(workflowId, run);
     }
 
     // ==================================================================
-    // 反例 B：逾時後完全不補償
+    // 反例 B（#137）：逾時後完全不補償
     // ==================================================================
 
     @Test
-    @DisplayName("缺陷 B：make_payment 已扣款但回報逾時（TIMED_OUT），補償應取消付款與訂單")
+    @DisplayName("缺陷 B（#137）：make_payment 已扣款但回報逾時（TIMED_OUT），補償應取消付款與訂單")
     void defectB_timedOutTaskIsNotInFailedSetSoNothingIsCompensated() throws Exception {
-        String email = SagaTestDb.uniqueId("defect-b") + "@example.com";
-        Task orderTask = orderFood(email);
-        String orderId = orderIdOf(orderTask);
+        String workflowId = SagaTestDb.uniqueId("wf-b");
+        String email = workflowId + "@example.com";
+        Task orderTask = orderFood(workflowId, email);
         Task inventoryTask = checkInventory();
         // worker 已完成扣款，但結果沒有在 responseTimeoutSeconds 內回報 → Conductor 標成 TIMED_OUT
-        makePayment(orderId);
+        makePayment(workflowId);
         Task paymentTask = task("make_payment_ref", Task.Status.TIMED_OUT);
 
-        JsonNode failed = failedWorkflow(Workflow.WorkflowStatus.TIMED_OUT,
+        JsonNode failed = failedWorkflow(workflowId, Workflow.WorkflowStatus.TIMED_OUT,
                 List.of(orderTask, inventoryTask, paymentTask));
         FailureWorkflowHarness.Run run = failureWorkflow.run(failed, email, CUSTOMER_NAME);
 
-        assertNothingLeft(orderId, run);
+        assertNothingLeft(workflowId, run);
+    }
+
+    @Test
+    @DisplayName("缺陷 B（#137）：order_food 已建立訂單但回報逾時，補償以 workflowId 取消訂單")
+    void defectB_timedOutOrderFoodIsCompensatedByWorkflowId() throws Exception {
+        String workflowId = SagaTestDb.uniqueId("wf-b-order");
+        String email = workflowId + "@example.com";
+        // worker 已建立訂單，但結果沒有回報 → TIMED_OUT 的 task 沒有 outputData.orderId
+        orderFood(workflowId, email);
+        Task orderTask = task("order_food_ref", Task.Status.TIMED_OUT);
+
+        JsonNode failed = failedWorkflow(workflowId, Workflow.WorkflowStatus.TIMED_OUT, List.of(orderTask));
+        FailureWorkflowHarness.Run run = failureWorkflow.run(failed, email, CUSTOMER_NAME);
+
+        assertNothingLeft(workflowId, run);
     }
 
     // ==================================================================
-    // 反例 C：並行分支失敗時 JOIN 競態（依 conductor-oss 原始碼推論）
+    // 反例 C（#138）：並行分支失敗時 JOIN 競態（依 conductor-oss 原始碼推論）
     // ==================================================================
 
     @Test
-    @DisplayName("缺陷 C（推論）：notify_driver 失敗且 JOIN 也標成 FAILED，補償應取消出貨、付款、訂單")
+    @DisplayName("缺陷 C（#138，推論）：notify_driver 失敗且 JOIN 也標成 FAILED，補償應取消出貨、付款、訂單")
     void defectC_failedJoinHidesTheFailedBranch() throws Exception {
         Forward f = runForwardUntilShipped();
-        JsonNode failed = failedWorkflow(Workflow.WorkflowStatus.FAILED, List.of(
+        JsonNode failed = failedWorkflow(f.workflowId, Workflow.WorkflowStatus.FAILED, List.of(
                 f.orderTask, f.inventoryTask, f.paymentTask, f.shipTask,
                 task("notify_fork_ref", Task.Status.COMPLETED),
                 task("notify_driver_ref", Task.Status.FAILED),
@@ -176,25 +205,25 @@ class SagaCompensationDefectTest {
 
         FailureWorkflowHarness.Run run = failureWorkflow.run(failed, f.email, CUSTOMER_NAME);
 
-        assertNothingLeft(f.orderId, run);
+        assertNothingLeft(f.workflowId, run);
     }
 
     // ==================================================================
-    // 反例 D：SCHEDULED 出貨單殘留
+    // 反例 D（#139）：SCHEDULED 出貨單殘留
     // ==================================================================
 
     @Test
-    @DisplayName("缺陷 D：confirmShipment 資料庫錯誤使出貨單停在 SCHEDULED，補償應取消出貨單")
+    @DisplayName("缺陷 D（#139）：confirmShipment 資料庫錯誤使出貨單停在 SCHEDULED，補償應取消出貨單")
     void defectD_scheduledShipmentIsNotCanceled() throws Exception {
         Forward f = runForwardUntilPaid();
-        failShipmentConfirmation(f.orderId);
-        Task shipTask = shipFood(f.orderId, TaskResult.Status.FAILED);
+        failShipmentConfirmation(f.workflowId);
+        Task shipTask = shipFood(f.workflowId, TaskResult.Status.FAILED);
 
-        JsonNode failed = failedWorkflow(Workflow.WorkflowStatus.FAILED, List.of(
+        JsonNode failed = failedWorkflow(f.workflowId, Workflow.WorkflowStatus.FAILED, List.of(
                 f.orderTask, f.inventoryTask, f.paymentTask, shipTask));
         FailureWorkflowHarness.Run run = failureWorkflow.run(failed, f.email, CUSTOMER_NAME);
 
-        assertNothingLeft(f.orderId, run);
+        assertNothingLeft(f.workflowId, run);
     }
 
     // ==================================================================
@@ -211,6 +240,8 @@ class SagaCompensationDefectTest {
                         + "' AND status IN ('SCHEDULED', 'CONFIRMED')");
         assertAll(run.toString(),
                 () -> assertEquals("COMPLETED", run.status(), "補償 workflow 應完成。" + run),
+                () -> assertEquals(orderId, run.extracted().path("orderId").asText(),
+                        "補償 workflow 應取消這筆訂單。" + run),
                 () -> assertEquals("CANCELLED", orderStatus, "訂單應被取消。" + run),
                 () -> assertEquals(0, activePayments, "不得殘留 SUCCESSFUL 付款。" + run),
                 () -> assertEquals(0, activeShipments, "不得殘留 SCHEDULED/CONFIRMED 出貨單。" + run));
@@ -220,25 +251,27 @@ class SagaCompensationDefectTest {
     // 正向步驟：呼叫真實 worker
     // ==================================================================
 
-    private record Forward(String email, String orderId, Task orderTask, Task inventoryTask,
+    private record Forward(String workflowId, String email, Task orderTask, Task inventoryTask,
                            Task paymentTask, Task shipTask) {
     }
 
-    private Forward runForwardUntilPaid() throws SQLException {
-        String email = SagaTestDb.uniqueId("buyer") + "@example.com";
-        Task orderTask = orderFood(email);
-        String orderId = orderIdOf(orderTask);
-        return new Forward(email, orderId, orderTask, checkInventory(), makePayment(orderId), null);
+    private Forward runForwardUntilPaid() {
+        String workflowId = SagaTestDb.uniqueId("wf");
+        String email = workflowId + "@example.com";
+        Task orderTask = orderFood(workflowId, email);
+        return new Forward(workflowId, email, orderTask, checkInventory(), makePayment(workflowId), null);
     }
 
-    private Forward runForwardUntilShipped() throws SQLException {
+    private Forward runForwardUntilShipped() {
         Forward f = runForwardUntilPaid();
-        return new Forward(f.email, f.orderId, f.orderTask, f.inventoryTask, f.paymentTask,
-                shipFood(f.orderId, TaskResult.Status.COMPLETED));
+        return new Forward(f.workflowId, f.email, f.orderTask, f.inventoryTask, f.paymentTask,
+                shipFood(f.workflowId, TaskResult.Status.COMPLETED));
     }
 
-    private Task orderFood(String email) {
+    /** order_food 的輸入 orderId 來自 {@code ${workflow.workflowId}}。 */
+    private Task orderFood(String workflowId, String email) {
         OrderRequest request = new OrderRequest();
+        request.setOrderId(workflowId);
         request.setCustomerEmail(email);
         request.setCustomerName(CUSTOMER_NAME);
         request.setCustomerContact("+886912345678");
@@ -248,6 +281,7 @@ class SagaCompensationDefectTest {
         request.setDeliveryAddress("台北市信義區信義路五段7號");
         TaskResult result = workers.orderFoodTask(request);
         assertEquals(TaskResult.Status.COMPLETED, result.getStatus(), "前置條件：order_food 應成功");
+        assertEquals(workflowId, result.getOutputData().get("orderId"), "前置條件：訂單 id 應等於 workflowId");
         return task("order_food_ref", Task.Status.COMPLETED, result.getOutputData());
     }
 
@@ -294,10 +328,6 @@ class SagaCompensationDefectTest {
         item.setItem("burger");
         item.setQuantity(1);
         return item;
-    }
-
-    private static String orderIdOf(Task orderTask) {
-        return String.valueOf(orderTask.getOutputData().get("orderId"));
     }
 
     // ==================================================================

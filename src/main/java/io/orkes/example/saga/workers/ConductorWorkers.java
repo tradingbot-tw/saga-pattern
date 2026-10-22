@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.ToIntFunction;
 
 @AllArgsConstructor
 @Component
@@ -156,52 +157,46 @@ public class ConductorWorkers {
         return result;
     }
 
-    @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
-    public TaskResult cancelPaymentTask(CancelRequest cancelRequest) {
-        String orderId = cancelRequest.getOrderId();
+    /**
+     * 三個 cancel_* 共用的流程（Issue #34、#136–#139）：
+     * <ul>
+     *   <li>orderId 空白：{@code FAILED_WITH_TERMINAL_ERROR}（即使 allowMissing，也不能假裝取消成功）</li>
+     *   <li>影響 0 列：預設 {@code FAILED_WITH_TERMINAL_ERROR}；{@code allowMissing} 時視為已取消，回 {@code COMPLETED}</li>
+     *   <li>資料庫例外：{@code FAILED}（可重試）</li>
+     * </ul>
+     */
+    private static TaskResult cancel(CancelRequest request, String what, ToIntFunction<String> canceller) {
+        String orderId = request.getOrderId();
+        if (orderId == null || orderId.isBlank()) {
+            return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                    "Cannot cancel " + what + ": orderId is missing");
+        }
         try {
-            int canceled = PaymentService.cancelPayment(orderId);
-            if (canceled == 0) {
+            int canceled = canceller.applyAsInt(orderId);
+            if (canceled == 0 && !request.isAllowMissing()) {
                 return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
-                        "No payment found for order " + orderId);
+                        "No " + what + " found for order " + orderId);
             }
             return completed();
         } catch (DataAccessException e) {
             return failed(TaskResult.Status.FAILED,
-                    "Failed to cancel payment for order " + orderId + ": " + e.getMessage());
+                    "Failed to cancel " + what + " for order " + orderId + ": " + e.getMessage());
         }
+    }
+
+    @WorkerTask(value = "cancel_payment", threadCount = 2, pollingInterval = 300)
+    public TaskResult cancelPaymentTask(CancelRequest cancelRequest) {
+        return cancel(cancelRequest, "payment", PaymentService::cancelPayment);
     }
 
     @WorkerTask(value = "cancel_delivery", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelDeliveryTask(CancelRequest cancelRequest) {
-        String orderId = cancelRequest.getOrderId();
-        try {
-            int canceled = ShipmentService.cancelDelivery(orderId);
-            if (canceled == 0) {
-                return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
-                        "No shipment found for order " + orderId);
-            }
-            return completed();
-        } catch (DataAccessException e) {
-            return failed(TaskResult.Status.FAILED,
-                    "Failed to cancel delivery for order " + orderId + ": " + e.getMessage());
-        }
+        return cancel(cancelRequest, "shipment", ShipmentService::cancelDelivery);
     }
 
     @WorkerTask(value = "cancel_order", threadCount = 2, pollingInterval = 300)
     public TaskResult cancelOrderTask(CancelRequest cancelRequest) {
-        String orderId = cancelRequest.getOrderId();
-        try {
-            int canceled = OrderService.cancelOrder(orderId);
-            if (canceled == 0) {
-                return failed(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
-                        "No order found for order " + orderId);
-            }
-            return completed();
-        } catch (DataAccessException e) {
-            return failed(TaskResult.Status.FAILED,
-                    "Failed to cancel order " + orderId + ": " + e.getMessage());
-        }
+        return cancel(cancelRequest, "order", OrderService::cancelOrder);
     }
 
 }

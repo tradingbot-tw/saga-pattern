@@ -19,8 +19,11 @@ public class OrderService {
     private static final OrdersDAO ORDERS_DAO = new OrdersDAO("jdbc:sqlite:food_delivery.db");
 
     public static String createOrder(OrderRequest orderRequest) {
-        UUID uuid = UUID.randomUUID();
-        String uuidAsString = uuid.toString();
+        // workflow 提供 orderId 時沿用（#137：補償 workflow 以 workflowId 取消訂單）
+        String requested = orderRequest.getOrderId();
+        String uuidAsString = requested != null && !requested.isBlank()
+                ? requested
+                : UUID.randomUUID().toString();
 
         Order order = new Order();
         order.setOrderId(uuidAsString);

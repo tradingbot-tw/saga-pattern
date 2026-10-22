@@ -119,6 +119,33 @@ class ConductorWorkersTest {
     }
 
     @Test
+    @DisplayName("orderId = workflowId（#137）：order_food 使用 workflow 提供的 orderId 建立訂單")
+    void orderFoodUsesOrderIdSuppliedByWorkflow() {
+        String workflowId = SagaTestDb.uniqueId("workflow");
+        OrderRequest request = orderRequest();
+        request.setOrderId(workflowId);
+
+        TaskResult result = workers.orderFoodTask(request);
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+        assertEquals(workflowId, result.getOutputData().get("orderId"));
+        assertEquals(Order.Status.PENDING, OrderService.getOrder(workflowId).getStatus());
+    }
+
+    @Test
+    @DisplayName("orderId = workflowId（#137）：workflow 輸入的 orderId key 能被 Conductor 的 ObjectMapper 綁定")
+    void orderIdInputKeyBindsToOrderRequest() {
+        Map<String, Object> input = new java.util.HashMap<>();
+        input.put("orderId", "wf-123");
+        input.put("customerEmail", "buyer@example.com");
+
+        OrderRequest bound = new com.netflix.conductor.common.config.ObjectMapperProvider()
+                .getObjectMapper().convertValue(input, OrderRequest.class);
+
+        assertEquals("wf-123", bound.getOrderId());
+    }
+
+    @Test
     @DisplayName("重試語義：order_food 寫入被拒（送件地址缺失）時回傳 FAILED，讓工作流依 policy 重試")
     void orderFoodFailsRetryablyWhenInsertIsRejected() {
         OrderRequest broken = orderRequest();
@@ -456,6 +483,68 @@ class ConductorWorkersTest {
             } finally {
                 stmt.execute("DROP TRIGGER IF EXISTS fail_cancel_order");
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // allowMissing（#136–#139）：補償 workflow 一律反向取消，查無資料視為已取消
+    // ------------------------------------------------------------------
+
+    private static CancelRequest allowMissing(String orderId) {
+        CancelRequest request = new CancelRequest();
+        request.setOrderId(orderId);
+        request.setAllowMissing(true);
+        return request;
+    }
+
+    @Test
+    @DisplayName("冪等補償：allowMissing 時 cancel_order 查無訂單回 COMPLETED")
+    void cancelOrderCompletesWhenMissingIsAllowed() {
+        TaskResult result = workers.cancelOrderTask(allowMissing(SagaTestDb.uniqueId("missing-order")));
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+    }
+
+    @Test
+    @DisplayName("冪等補償：allowMissing 時 cancel_payment 查無付款回 COMPLETED")
+    void cancelPaymentCompletesWhenMissingIsAllowed() {
+        TaskResult result = workers.cancelPaymentTask(allowMissing(SagaTestDb.uniqueId("missing-payment")));
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+    }
+
+    @Test
+    @DisplayName("冪等補償：allowMissing 時 cancel_delivery 查無外送單回 COMPLETED")
+    void cancelDeliveryCompletesWhenMissingIsAllowed() {
+        TaskResult result = workers.cancelDeliveryTask(allowMissing(SagaTestDb.uniqueId("missing-shipment")));
+
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+    }
+
+    @Test
+    @DisplayName("冪等補償：allowMissing 時有資料仍會取消")
+    void cancelWithAllowMissingStillCancelsExistingRows() throws Exception {
+        String orderId = String.valueOf(workers.orderFoodTask(orderRequest()).getOutputData().get("orderId"));
+        workers.makePaymentTask(paymentRequest(orderId, futureExpiry()));
+
+        assertEquals(TaskResult.Status.COMPLETED, workers.cancelPaymentTask(allowMissing(orderId)).getStatus());
+        assertEquals(TaskResult.Status.COMPLETED, workers.cancelOrderTask(allowMissing(orderId)).getStatus());
+        assertEquals("CANCELED", SagaTestDb.queryString(URL,
+                "SELECT status FROM payments WHERE orderId = '" + orderId + "'"));
+        assertEquals("CANCELLED", SagaTestDb.queryString(URL,
+                "SELECT status FROM orders WHERE orderId = '" + orderId + "'"));
+    }
+
+    @Test
+    @DisplayName("冪等補償：allowMissing 不放過空白 orderId，三個 cancel 都回 FAILED_WITH_TERMINAL_ERROR")
+    void cancelWithAllowMissingRejectsBlankOrderId() {
+        for (String blank : new String[]{null, "", "  "}) {
+            assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                    workers.cancelOrderTask(allowMissing(blank)).getStatus(), "cancel_order orderId=" + blank);
+            assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                    workers.cancelPaymentTask(allowMissing(blank)).getStatus(), "cancel_payment orderId=" + blank);
+            assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR,
+                    workers.cancelDeliveryTask(allowMissing(blank)).getStatus(), "cancel_delivery orderId=" + blank);
         }
     }
 
