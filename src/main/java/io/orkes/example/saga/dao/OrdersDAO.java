@@ -29,34 +29,47 @@ public class OrdersDAO extends BaseDAO {
             notesStr = "";
         }
 
-        String sql = "INSERT INTO orders(orderId,customerId,restaurantId,deliveryAddress,createdAt,status) VALUES(?,?,?,?,?,?)";
+        String insertOrderSql = "INSERT INTO orders(orderId,customerId,restaurantId,deliveryAddress,createdAt,status) VALUES(?,?,?,?,?,?)";
+        String insertDetailsSql = "INSERT INTO orders_details(orderId,items,notes) VALUES(?,?,?)";
 
-        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, order.getOrderId());
-            pstmt.setInt(2, order.getCustomer().getId());
-            pstmt.setInt(3, order.getRestaurantId());
-            pstmt.setString(4, order.getDeliveryAddress());
-            pstmt.setTimestamp(5, nowAsTS);
-            pstmt.setString(6, order.getStatus().name());
-            pstmt.executeUpdate();
+        // 兩個 INSERT 共用同一個連線，並包成一個交易：任何一步失敗都 rollback，
+        // 不讓 orders 留下沒有明細的半成品（Issue #86）。
+        try (Connection conn = this.connect()) {
+            try {
+                conn.setAutoCommit(false);
+
+                try (PreparedStatement pstmt = conn.prepareStatement(insertOrderSql)) {
+                    pstmt.setString(1, order.getOrderId());
+                    pstmt.setInt(2, order.getCustomer().getId());
+                    pstmt.setInt(3, order.getRestaurantId());
+                    pstmt.setString(4, order.getDeliveryAddress());
+                    pstmt.setTimestamp(5, nowAsTS);
+                    pstmt.setString(6, order.getStatus().name());
+                    pstmt.executeUpdate();
+                }
+
+                try (PreparedStatement pstmt = conn.prepareStatement(insertDetailsSql)) {
+                    pstmt.setString(1, order.getOrderId());
+                    pstmt.setString(2, itemsStr);
+                    pstmt.setString(3, notesStr);
+                    pstmt.executeUpdate();
+                }
+
+                conn.commit();
+                return "";
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
+                System.out.println(e.getMessage());
+                return e.getMessage();
+            }
         } catch (SQLException e) {
             System.out.println(e.getMessage());
             return e.getMessage();
         }
-
-        sql = "INSERT INTO orders_details(orderId,items,notes) VALUES(?,?,?)";
-
-        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, order.getOrderId());
-            pstmt.setString(2, itemsStr);
-            pstmt.setString(3, notesStr);
-            pstmt.executeUpdate();
-        } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return e.getMessage();
-        }
-
-        return "";
     }
 
     /**

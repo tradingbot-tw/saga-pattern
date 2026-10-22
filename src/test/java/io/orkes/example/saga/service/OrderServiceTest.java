@@ -5,7 +5,6 @@ import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -113,7 +112,6 @@ class OrderServiceTest {
     }
 
     @Test
-    @Disabled("Issue #86：交易修復前紅燈；02-impl 移除 @Disabled")
     @DisplayName("AC-4 交易回滾：orders_details 寫入失敗 → createOrder 回傳 null 且不留下訂單列")
     void createOrderRollsBackOrderWhenOrderDetailsWriteFails() throws Exception {
         String email = SagaTestDb.uniqueId("rollback") + "@example.com";

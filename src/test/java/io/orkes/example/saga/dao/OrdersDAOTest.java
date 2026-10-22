@@ -7,7 +7,6 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -93,7 +92,6 @@ class OrdersDAOTest {
     }
 
     @Test
-    @Disabled("Issue #86：交易修復前紅燈；02-impl 移除 @Disabled")
     @DisplayName("交易回滾：orders_details 寫入失敗時，該 orderId 在 orders／orders_details 都不得留列")
     void insertOrderRollsBackOrderWhenDetailsInsertFails() throws Exception {
         String orderId = SagaTestDb.uniqueId("tx-order");
