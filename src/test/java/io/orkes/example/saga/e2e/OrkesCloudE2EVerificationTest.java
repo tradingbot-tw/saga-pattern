@@ -1,5 +1,7 @@
 package io.orkes.example.saga.e2e;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.netflix.conductor.common.config.ObjectMapperProvider;
 import com.netflix.conductor.common.metadata.tasks.Task;
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import com.netflix.conductor.common.metadata.workflow.StartWorkflowRequest;
@@ -10,28 +12,48 @@ import io.orkes.conductor.client.http.OrkesWorkflowClient;
 import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.pojos.*;
 import io.orkes.example.saga.workers.ConductorWorkers;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 真實 Orkes Cloud 端到端整合驗證測試：
- * 僅在本地存在 .env.local 憑證時執行；若無憑證則自動跳過，不影響 CI。
+ * 真實 Orkes Cloud 端到端驗證（#136–#139 的補償 workflow）。
+ *
+ * <p>僅在本地存在 .env.local 憑證時執行；若無憑證則自動跳過，不影響 CI。
+ * 每個測試用獨立的 task domain，由本測試扮演 worker：從 Orkes 領取 task、以 Conductor 的
+ * ObjectMapper 把 task 的實際 {@code inputData} 綁定到 worker 參數（與 SDK 相同），在本地 SQLite 執行，再回報結果。
+ * 因此也驗證了 server 上的定義確實傳出 {@code orderId = workflowId} 與 {@code allowMissing = true}。
+ *
+ * <p>缺陷 C（JOIN 競態）無法刻意觸發，不在此驗證；由 {@code SagaCompensationDefectTest} 以模擬紀錄覆蓋。
  */
 class OrkesCloudE2EVerificationTest {
 
     private static final String APP_DB_URL = SagaTestDb.APP_DB_URL;
+    private static final ObjectMapper MAPPER = new ObjectMapperProvider().getObjectMapper();
     private static String serverUrl;
     private static String keyId;
     private static String keySecret;
     private static boolean credentialsAvailable = false;
+
+    private OrkesWorkflowClient workflowClient;
+    private OrkesTaskClient taskClient;
+    private ConductorWorkers workers;
+    private String domain;
+    private final List<String> triggers = new ArrayList<>();
 
     @BeforeAll
     static void loadCredentialsAndInitDb() {
@@ -54,26 +76,110 @@ class OrkesCloudE2EVerificationTest {
         }
     }
 
-    private static FoodItem item(String name, int quantity) {
-        FoodItem foodItem = new FoodItem();
-        foodItem.setItem(name);
-        foodItem.setQuantity(quantity);
-        return foodItem;
+    @BeforeEach
+    void connect() {
+        Assumptions.assumeTrue(credentialsAvailable, "未偵測到 .env.local 憑證，跳過真實雲端 E2E 測試");
+        ApiClient apiClient = new ApiClient(serverUrl, keyId, keySecret);
+        workflowClient = new OrkesWorkflowClient(apiClient);
+        taskClient = new OrkesTaskClient(apiClient);
+        workers = new ConductorWorkers();
+        domain = "e2e-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    @AfterEach
+    void dropInjectedFaults() throws Exception {
+        for (String trigger : triggers) {
+            execute("DROP TRIGGER IF EXISTS \"" + trigger + "\"");
+        }
+        triggers.clear();
+    }
+
+    // ==================================================================
+    // 情境
+    // ==================================================================
+
+    @Test
+    @DisplayName("E2E：make_payment 被拒 → 補償反向取消（cancel_delivery 為 no-op），訂單與付款皆取消")
+    void paymentDeclinedIsCompensated() throws Exception {
+        String workflowId = startWorkflow(expiredCard());
+        orderFood(workflowId);
+        checkInventory();
+        TaskResult payment = execute("make_payment", t -> workers.makePaymentTask(bind(t, PaymentRequest.class)));
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, payment.getStatus());
+
+        awaitMainTerminated(workflowId, Workflow.WorkflowStatus.FAILED, 60);
+        runCompensation(workflowId);
+        assertNothingLeft(workflowId);
     }
 
     @Test
-    @DisplayName("真實 Orkes Cloud E2E：驗證 make_payment 失敗後，雲端自動觸發補償並直接執行 cancel_order，達成最終一致性")
-    void testRealOrkesCloudE2ECompensationFix() throws Exception {
-        Assumptions.assumeTrue(credentialsAvailable, "未偵測到 .env.local 憑證，跳過真實雲端 E2E 測試");
+    @DisplayName("E2E 缺陷 A（#136）：check_inventory 失敗一次後重試成功，ship_food 失敗 → 付款仍被取消")
+    void retriedCheckInventoryDoesNotChangeCompensation() throws Exception {
+        String workflowId = startWorkflow(validCard());
+        orderFood(workflowId);
+        // 第一次嘗試回報 FAILED（可重試），Conductor 在 retryDelaySeconds（10 秒）後重排
+        execute("check_inventory", t -> {
+            TaskResult r = new TaskResult();
+            r.setStatus(TaskResult.Status.FAILED);
+            r.setReasonForIncompletion("e2e: transient failure");
+            return r;
+        });
+        checkInventory();
+        TaskResult payment = execute("make_payment", t -> workers.makePaymentTask(bind(t, PaymentRequest.class)));
+        assertEquals(TaskResult.Status.COMPLETED, payment.getStatus());
+        failNextShipmentInsert(workflowId);
+        TaskResult ship = execute("ship_food", t -> workers.shipFoodTask(bind(t, ShippingRequest.class)));
+        assertEquals(TaskResult.Status.FAILED, ship.getStatus());
 
-        ApiClient apiClient = new ApiClient(serverUrl, keyId, keySecret);
-        OrkesWorkflowClient workflowClient = new OrkesWorkflowClient(apiClient);
-        OrkesTaskClient taskClient = new OrkesTaskClient(apiClient);
+        Workflow main = awaitMainTerminated(workflowId, Workflow.WorkflowStatus.FAILED, 60);
+        System.out.println(">>> [E2E A] failedReferenceTaskNames = " + main.getFailedReferenceTaskNames());
+        assertTrue(main.getFailedReferenceTaskNames().contains("check_inventory_ref"),
+                "前置條件：重試前的失敗嘗試應留在 failedReferenceTaskNames，實際為 " + main.getFailedReferenceTaskNames());
+        runCompensation(workflowId);
+        assertNothingLeft(workflowId);
+    }
 
-        ConductorWorkers workers = new ConductorWorkers();
-        String domain = "e2e-" + System.currentTimeMillis();
+    @Test
+    @DisplayName("E2E 缺陷 B（#137）：make_payment 已扣款但沒有回報、逾時 → 付款與訂單仍被取消")
+    void timedOutPaymentIsCompensated() throws Exception {
+        String workflowId = startWorkflow(validCard());
+        orderFood(workflowId);
+        checkInventory();
+        // 領取並在本地完成扣款，但不回報 → responseTimeoutSeconds（60 秒）後 TIMED_OUT
+        Task paymentTask = pollWithRetry("make_payment", 30);
+        assertNotNull(paymentTask, "應領取到 make_payment");
+        assertEquals(TaskResult.Status.COMPLETED,
+                workers.makePaymentTask(bind(paymentTask, PaymentRequest.class)).getStatus());
 
-        // 1. 發起真實主流程 FoodDeliveryWorkflow
+        awaitMainTerminated(workflowId, Workflow.WorkflowStatus.TIMED_OUT, 240);
+        runCompensation(workflowId);
+        assertNothingLeft(workflowId);
+    }
+
+    @Test
+    @DisplayName("E2E 缺陷 D（#139）：confirmShipment 資料庫錯誤，出貨單停在 SCHEDULED → 補償取消出貨單")
+    void scheduledShipmentIsCanceled() throws Exception {
+        String workflowId = startWorkflow(validCard());
+        orderFood(workflowId);
+        checkInventory();
+        assertEquals(TaskResult.Status.COMPLETED,
+                execute("make_payment", t -> workers.makePaymentTask(bind(t, PaymentRequest.class))).getStatus());
+        failShipmentConfirmation(workflowId);
+        TaskResult ship = execute("ship_food", t -> workers.shipFoodTask(bind(t, ShippingRequest.class)));
+        assertEquals(TaskResult.Status.FAILED, ship.getStatus());
+        assertEquals(1, SagaTestDb.count(APP_DB_URL, "SELECT COUNT(*) FROM shipments WHERE orderId = '"
+                + workflowId + "' AND status = 'SCHEDULED'"), "前置條件：出貨單應停在 SCHEDULED");
+
+        awaitMainTerminated(workflowId, Workflow.WorkflowStatus.FAILED, 60);
+        runCompensation(workflowId);
+        assertNothingLeft(workflowId);
+    }
+
+    // ==================================================================
+    // 正向步驟與補償
+    // ==================================================================
+
+    private String startWorkflow(Map<String, Object> paymentMethod) {
         StartWorkflowRequest startReq = new StartWorkflowRequest();
         startReq.setName("FoodDeliveryWorkflow");
         startReq.setVersion(1);
@@ -90,127 +196,122 @@ class OrkesCloudE2EVerificationTest {
         input.put("address", "台北市信義區信義路五段7號");
         input.put("deliveryInstructions", "無接觸送餐");
         input.put("paymentAmount", 120.0);
-        // 使用過期卡片確保 make_payment 必然失敗
-        input.put("paymentMethod", Map.of(
-                "type", "Credit Card",
-                "details", Map.of(
-                        "number", "4111111111111111",
-                        "expiry", "01/2020",
-                        "cvv", 123
-                )
-        ));
+        input.put("paymentMethod", paymentMethod);
         startReq.setInput(input);
 
-        String mainWorkflowId = workflowClient.startWorkflow(startReq);
-        assertNotNull(mainWorkflowId, "主流程啟動成功，獲得 workflowId");
-        System.out.println(">>> [E2E] 主流程已於 Orkes Cloud 啟動，workflowId: " + mainWorkflowId);
+        String workflowId = workflowClient.startWorkflow(startReq);
+        assertNotNull(workflowId, "主流程啟動成功");
+        System.out.println(">>> [E2E] 主流程已啟動，workflowId: " + workflowId + "，domain: " + domain);
+        return workflowId;
+    }
 
-        String orderId = null;
+    private void orderFood(String workflowId) throws Exception {
+        TaskResult result = execute("order_food", t -> {
+            OrderRequest request = bind(t, OrderRequest.class);
+            assertEquals(workflowId, request.getOrderId(), "order_food 的 orderId 應為 workflowId");
+            return workers.orderFoodTask(request);
+        });
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+        assertEquals(workflowId, result.getOutputData().get("orderId"));
+    }
 
-        // 2. 模擬 Worker 依序認領並執行正向步驟
-        // Task 1: order_food
-        Task orderFoodTask = pollWithRetry(taskClient, "order_food", domain, 30);
-        assertNotNull(orderFoodTask, "成功從 Orkes Cloud 領取到 order_food 任務");
-        OrderRequest orderReq = new OrderRequest();
-        orderReq.setCustomerEmail("e2e-verify@example.com");
-        orderReq.setCustomerName("E2E實測買家");
-        orderReq.setCustomerContact("+886912345678");
-        orderReq.setRestaurantId(1);
-        orderReq.setItems(new ArrayList<>(List.of(item("burger", 1))));
-        orderReq.setNotes(new ArrayList<>(List.of("請放門口")));
-        orderReq.setDeliveryAddress("台北市信義區信義路五段7號");
+    private void checkInventory() throws Exception {
+        TaskResult result = execute("check_inventory",
+                t -> workers.checkInventoryTask(bind(t, CheckInventoryRequest.class)));
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus());
+    }
 
-        TaskResult orderRes = workers.orderFoodTask(orderReq);
-        assertEquals(TaskResult.Status.COMPLETED, orderRes.getStatus());
-        orderId = (String) orderRes.getOutputData().get("orderId");
-        assertNotNull(orderId, "成功建立本地 SQLite 訂單");
-        orderRes.setTaskId(orderFoodTask.getTaskId());
-        orderRes.setWorkflowInstanceId(mainWorkflowId);
-        taskClient.updateTask(orderRes);
-        System.out.println(">>> [E2E] order_food 已完成，建立訂單: " + orderId);
+    /** 補償 workflow：cancel_delivery → cancel_payment → cancel_order → notify_customer，且都以 workflowId 為 orderId。 */
+    private void runCompensation(String workflowId) throws Exception {
+        String failureWorkflowId = null;
+        for (String cancel : List.of("cancel_delivery", "cancel_payment", "cancel_order")) {
+            Task task = pollWithRetry(cancel, 60);
+            assertNotNull(task, "Orkes 應派發 " + cancel);
+            failureWorkflowId = task.getWorkflowInstanceId();
+            CancelRequest request = bind(task, CancelRequest.class);
+            assertEquals(workflowId, request.getOrderId(), cancel + " 的 orderId 應為 workflowId");
+            assertTrue(request.isAllowMissing(), cancel + " 應帶 allowMissing=true");
+            TaskResult result = switch (cancel) {
+                case "cancel_delivery" -> workers.cancelDeliveryTask(request);
+                case "cancel_payment" -> workers.cancelPaymentTask(request);
+                default -> workers.cancelOrderTask(request);
+            };
+            assertEquals(TaskResult.Status.COMPLETED, result.getStatus(), cancel + " 應完成");
+            report(task, result);
+            System.out.println(">>> [E2E] " + cancel + " 完成");
+        }
+        Task notify = pollWithRetry("notify_customer", 60);
+        assertNotNull(notify, "Orkes 應派發 notify_customer");
+        workers.checkForCustomerNotifications(bind(notify, CustomerNotificationRequest.class));
+        TaskResult done = new TaskResult();
+        done.setStatus(TaskResult.Status.COMPLETED);
+        report(notify, done);
 
-        // Task 2: check_inventory
-        Task checkInventoryTask = pollWithRetry(taskClient, "check_inventory", domain, 30);
-        assertNotNull(checkInventoryTask, "成功從 Orkes Cloud 領取到 check_inventory 任務");
-        CheckInventoryRequest inventoryReq = new CheckInventoryRequest();
-        inventoryReq.setRestaurantId(1);
-        inventoryReq.setItems(new ArrayList<>(List.of(item("burger", 1))));
-        TaskResult inventoryRes = workers.checkInventoryTask(inventoryReq);
-        assertEquals(TaskResult.Status.COMPLETED, inventoryRes.getStatus());
-        inventoryRes.setTaskId(checkInventoryTask.getTaskId());
-        inventoryRes.setWorkflowInstanceId(mainWorkflowId);
-        taskClient.updateTask(inventoryRes);
-        System.out.println(">>> [E2E] check_inventory 已完成");
-
-        // Task 3: make_payment（執行扣款，卡片過期失敗）
-        Task makePaymentTask = pollWithRetry(taskClient, "make_payment", domain, 30);
-        assertNotNull(makePaymentTask, "成功從 Orkes Cloud 領取到 make_payment 任務");
-        PaymentRequest paymentReq = new PaymentRequest();
-        paymentReq.setOrderId(orderId);
-        paymentReq.setAmount(120.0f);
-        PaymentMethod method = new PaymentMethod();
-        method.setType("Credit Card");
-        PaymentDetails details = new PaymentDetails();
-        details.setNumber("4111111111111111");
-        details.setExpiry("01/2020");
-        details.setCvv(123);
-        method.setDetails(details);
-        paymentReq.setMethod(method);
-
-        TaskResult paymentRes = workers.makePaymentTask(paymentReq);
-        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, paymentRes.getStatus());
-        paymentRes.setTaskId(makePaymentTask.getTaskId());
-        paymentRes.setWorkflowInstanceId(mainWorkflowId);
-        taskClient.updateTask(paymentRes);
-        System.out.println(">>> [E2E] make_payment 已回報 FAILED_WITH_TERMINAL_ERROR");
-
-        // 3. 等待 Orkes Cloud 自動觸發 FoodDeliveryFailureWorkflow
-        System.out.println(">>> [E2E] 等待 Orkes Cloud 觸發 failureWorkflow...");
-        Workflow mainWorkflow = null;
+        Workflow compensation = null;
         for (int i = 0; i < 30; i++) {
-            mainWorkflow = workflowClient.getWorkflow(mainWorkflowId, false);
-            if (mainWorkflow.getStatus() == Workflow.WorkflowStatus.FAILED) {
+            compensation = workflowClient.getWorkflow(failureWorkflowId, false);
+            if (compensation.getStatus().isTerminal()) {
                 break;
             }
             Thread.sleep(1000);
         }
-        assertEquals(Workflow.WorkflowStatus.FAILED, mainWorkflow.getStatus(), "主流程應為 FAILED 狀態");
-
-        // 4. 關鍵驗證：雲端應走入修正後的分支，直接派發 cancel_order，絕對不可派發 cancel_payment！
-        System.out.println(">>> [E2E] 領取補償任務，驗證雲端是否直接派發 cancel_order...");
-        Task compensationTask = pollWithRetry(taskClient, "cancel_order", domain, 30);
-        assertNotNull(compensationTask, "【關鍵驗證成功】Orkes Cloud 直接派發了 cancel_order！");
-        assertEquals("cancel_order", compensationTask.getTaskType());
-
-        // 執行本地 cancel_order
-        CancelRequest cancelReq = new CancelRequest();
-        cancelReq.setOrderId(orderId);
-        TaskResult cancelOrderRes = workers.cancelOrderTask(cancelReq);
-        assertEquals(TaskResult.Status.COMPLETED, cancelOrderRes.getStatus());
-        cancelOrderRes.setTaskId(compensationTask.getTaskId());
-        cancelOrderRes.setWorkflowInstanceId(compensationTask.getWorkflowInstanceId());
-        taskClient.updateTask(cancelOrderRes);
-        System.out.println(">>> [E2E] cancel_order 本地回滾成功並已回傳 Orkes Cloud");
-
-        // 5. 補償流程最後一步：notify_customer
-        Task notifyTask = pollWithRetry(taskClient, "notify_customer", domain, 30);
-        if (notifyTask != null) {
-            TaskResult notifyRes = new TaskResult(notifyTask);
-            notifyRes.setStatus(TaskResult.Status.COMPLETED);
-            taskClient.updateTask(notifyRes);
-            System.out.println(">>> [E2E] notify_customer 完成");
-        }
-
-        // 6. 驗證資料庫最終一致性：訂單必須成功回滾為 CANCELLED
-        String finalOrderStatus = SagaTestDb.queryString(APP_DB_URL,
-                "SELECT status FROM orders WHERE orderId = '" + orderId + "'");
-        assertEquals("CANCELLED", finalOrderStatus,
-                "【最終一致性達成】資料庫訂單已成功回滾為 CANCELLED！");
-
-        System.out.println(">>> [E2E] 全流程通過！真實 Orkes Cloud 成功跳過無效付款取消，完成訂單回滾！");
+        assertEquals(Workflow.WorkflowStatus.COMPLETED, compensation.getStatus(), "補償 workflow 應完成");
     }
 
-    private Task pollWithRetry(OrkesTaskClient taskClient, String taskType, String domain, int maxSeconds) throws Exception {
+    private Workflow awaitMainTerminated(String workflowId, Workflow.WorkflowStatus expected, int maxSeconds)
+            throws Exception {
+        Workflow main = null;
+        for (int i = 0; i < maxSeconds; i++) {
+            main = workflowClient.getWorkflow(workflowId, true);
+            if (main.getStatus().isTerminal()) {
+                break;
+            }
+            Thread.sleep(1000);
+        }
+        assertEquals(expected, main.getStatus(), "主流程狀態");
+        return main;
+    }
+
+    private void assertNothingLeft(String orderId) throws Exception {
+        assertAll(
+                () -> assertEquals("CANCELLED", SagaTestDb.queryString(APP_DB_URL,
+                        "SELECT status FROM orders WHERE orderId = '" + orderId + "'"), "訂單應取消"),
+                () -> assertEquals(0, SagaTestDb.count(APP_DB_URL, "SELECT COUNT(*) FROM payments WHERE orderId = '"
+                        + orderId + "' AND status = 'SUCCESSFUL'"), "不得殘留 SUCCESSFUL 付款"),
+                () -> assertEquals(0, SagaTestDb.count(APP_DB_URL, "SELECT COUNT(*) FROM shipments WHERE orderId = '"
+                        + orderId + "' AND status IN ('SCHEDULED', 'CONFIRMED')"), "不得殘留出貨單"));
+        System.out.println(">>> [E2E] 最終一致性通過：" + orderId);
+    }
+
+    // ==================================================================
+    // 基礎設施
+    // ==================================================================
+
+    private interface Handler {
+        TaskResult handle(Task task) throws Exception;
+    }
+
+    /** 領取一個 task、處理並回報。 */
+    private TaskResult execute(String taskType, Handler handler) throws Exception {
+        Task task = pollWithRetry(taskType, 60);
+        assertNotNull(task, "應從 Orkes Cloud 領取到 " + taskType);
+        TaskResult result = handler.handle(task);
+        report(task, result);
+        System.out.println(">>> [E2E] " + taskType + " 回報 " + result.getStatus());
+        return result;
+    }
+
+    private void report(Task task, TaskResult result) {
+        result.setTaskId(task.getTaskId());
+        result.setWorkflowInstanceId(task.getWorkflowInstanceId());
+        taskClient.updateTask(result);
+    }
+
+    private static <T> T bind(Task task, Class<T> type) {
+        return MAPPER.convertValue(task.getInputData(), type);
+    }
+
+    private Task pollWithRetry(String taskType, int maxSeconds) throws Exception {
         for (int i = 0; i < maxSeconds; i++) {
             Task task = taskClient.pollTask(taskType, "e2e-worker", domain);
             if (task != null && task.getTaskId() != null) {
@@ -219,5 +320,36 @@ class OrkesCloudE2EVerificationTest {
             Thread.sleep(1000);
         }
         return null;
+    }
+
+    private static Map<String, Object> expiredCard() {
+        return Map.of("type", "Credit Card",
+                "details", Map.of("number", "4111111111111111", "expiry", "01/2020", "cvv", 123));
+    }
+
+    private static Map<String, Object> validCard() {
+        String expiry = YearMonth.now().plusYears(2).format(DateTimeFormatter.ofPattern("MM/yyyy"));
+        return Map.of("type", "Credit Card",
+                "details", Map.of("number", "4111111111111111", "expiry", expiry, "cvv", 123));
+    }
+
+    private void failNextShipmentInsert(String orderId) throws Exception {
+        String name = "e2e_insert_fail_" + orderId;
+        execute("CREATE TRIGGER \"" + name + "\" BEFORE INSERT ON shipments WHEN NEW.orderId = '" + orderId
+                + "' BEGIN SELECT RAISE(ABORT, 'injected: insert shipment failed'); END");
+        triggers.add(name);
+    }
+
+    private void failShipmentConfirmation(String orderId) throws Exception {
+        String name = "e2e_confirm_fail_" + orderId;
+        execute("CREATE TRIGGER \"" + name + "\" BEFORE UPDATE ON shipments WHEN NEW.orderId = '" + orderId
+                + "' AND NEW.status = 'CONFIRMED' BEGIN SELECT RAISE(ABORT, 'injected: confirm shipment failed'); END");
+        triggers.add(name);
+    }
+
+    private static void execute(String sql) throws Exception {
+        try (Connection conn = DriverManager.getConnection(APP_DB_URL); Statement stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
     }
 }

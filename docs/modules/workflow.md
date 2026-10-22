@@ -11,7 +11,7 @@
 | 位置 | 內容 |
 | --- | --- |
 | `conductor/workflows/FoodDeliveryWorkflow.v1.json` | 主流程 `FoodDeliveryWorkflow`（version 1）；成功路徑與 `failureWorkflow` 的掛載點 |
-| `conductor/workflows/FoodDeliveryFailureWorkflow.v1.json` | 補償流程 `FoodDeliveryFailureWorkflow`（version 1）；依失敗點只補償已完成的步驟 |
+| `conductor/workflows/FoodDeliveryFailureWorkflow.v1.json` | 補償流程 `FoodDeliveryFailureWorkflow`（version 1）；不看失敗點，一律反向執行冪等的取消 |
 | `conductor/taskdefs/*.json` | 9 個 task 的 `TaskDef`：重試次數、重試間隔、timeout 與 input／output keys |
 | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java` | 9 個 `@WorkerTask` 的實作；task 名稱、輸入 POJO、輸出 key 與狀態語意的程式碼端 |
 | `src/main/java/io/orkes/example/saga/service/WorkflowService.java` | 啟動 `FoodDeliveryWorkflow` v1、組裝 10 個起始輸入、設定 task domain |
@@ -67,7 +67,7 @@ flowchart LR
 
 | 順序 | Task（`taskReferenceName`） | 類型 | `inputParameters`（JSON key ← 來源） | worker 輸出 |
 | --- | --- | --- | --- | --- |
-| 1 | `order_food`（`order_food_ref`） | SIMPLE | `customerEmail` ← `workflow.input.customerEmail`<br>`customerName` ← `workflow.input.customerName`<br>`customerContact` ← `workflow.input.customerContact`<br>`restaurantId` ← `workflow.input.restaurantId`<br>`items` ← `workflow.input.foodItems`<br>`notes` ← `workflow.input.additionalNotes`<br>`deliveryAddress` ← `workflow.input.address`<br>`deliveryInstructions` ← `workflow.input.deliveryInstructions` | `orderId` |
+| 1 | `order_food`（`order_food_ref`） | SIMPLE | `orderId` ← `workflow.workflowId`（#137）<br>`customerEmail` ← `workflow.input.customerEmail`<br>`customerName` ← `workflow.input.customerName`<br>`customerContact` ← `workflow.input.customerContact`<br>`restaurantId` ← `workflow.input.restaurantId`<br>`items` ← `workflow.input.foodItems`<br>`notes` ← `workflow.input.additionalNotes`<br>`deliveryAddress` ← `workflow.input.address`<br>`deliveryInstructions` ← `workflow.input.deliveryInstructions` | `orderId` |
 | 2 | `check_inventory`（`check_inventory_ref`） | SIMPLE | `restaurantId` ← `workflow.input.restaurantId`<br>`items` ← `workflow.input.foodItems` | 無 |
 | 3 | `make_payment`（`make_payment_ref`） | SIMPLE | `orderId` ← `order_food_ref.output.orderId`<br>`amount` ← `workflow.input.paymentAmount`<br>`method` ← `workflow.input.paymentMethod` | 成功：`orderId`、`paymentId`、`paymentStatus`<br>失敗：另含 `error` |
 | 4 | `ship_food`（`ship_food_ref`） | SIMPLE | `orderId` ← `order_food_ref.output.orderId`<br>`deliveryAddress` ← `workflow.input.address`<br>`deliveryInstructions` ← `workflow.input.deliveryInstructions` | 成功：`driverId`<br>失敗：無輸出 |
@@ -78,11 +78,12 @@ flowchart LR
 
 各步驟實際做的事：
 
-- **`order_food`**：呼叫 `OrderService.createOrder`，建立 UUID 形式的 `orderId`，
+- **`order_food`**：呼叫 `OrderService.createOrder`，以 `workflowId` 作為 `orderId`
+  （`OrderRequest.orderId` ← `workflow.workflowId`；未提供時 `createOrder` 才自行產生 UUID），
   先建立或重用 `customers`，再寫入 `orders` 與 `orders_details`，訂單初始狀態為
-  `PENDING`。成功時輸出 `orderId`。`OrderRequest.OrderRequestId` 沒有對應的 JSON
-  input，`OrderService.createOrder` 也沒有使用它；`deliveryInstructions` 雖有綁定，
-  但 `OrderService.createOrder` 沒有把它寫入資料庫。
+  `PENDING`。成功時輸出 `orderId`（等於 `workflowId`）。這是 #137 的修正：`order_food`
+  逾時而訂單已建立時，補償 workflow 仍能以 `workflowId` 取消訂單。
+  `deliveryInstructions` 雖有綁定，但 `OrderService.createOrder` 沒有把它寫入資料庫。
 - **`check_inventory`**：呼叫 `InventoryService.checkAvailability`，依 `restaurantId`
   讀取 `restaurants`；目前語意是「餐廳是否存在」（名稱非空），**不檢查也不保留食材庫存**，
   `items` 參數沒有被使用。成功時沒有輸出，下游只依 task 狀態繼續。
@@ -113,7 +114,6 @@ flowchart LR
 
 | POJO | 欄位 | 現況 |
 | --- | --- | --- |
-| `OrderRequest` | `OrderRequestId` | JSON 沒有提供；`OrderService.createOrder` 未使用 |
 | `PaymentRequest` | `customerId` | JSON 沒有提供；`PaymentService` 未使用 |
 | `DriverNotificationRequest` | `pickUp` | JSON 沒有提供；`notify_driver` 目前是空實作 |
 
@@ -144,62 +144,63 @@ flowchart LR
 | `customerName` | 原 workflow 的客戶姓名；同上 |
 
 補償 workflow 的步驟是：`extract_failure_context`（JSON_JQ_TRANSFORM）→
-`switch_compensate_from`（SWITCH）→ `notify_customer`（SIMPLE，接續執行）。
+`cancel_delivery` → `cancel_payment` → `cancel_order` → `notify_customer`，
+四個都是 SIMPLE，依序執行。
 
 ### 3.2 取出失敗上下文
 
 `extract_failure_context` 的 `queryExpression` 是：
 
 ```jq
-{ orderId: (.parent.output.orderId // first(.parent.tasks[]? | select(.referenceTaskName == "order_food_ref") | .outputData.orderId)), failedTaskName: .parent.failedReferenceTaskNames[0] }
+{ orderId: (.parent.output.orderId // first(.parent.tasks[]? | select(.referenceTaskName == "order_food_ref") | .outputData.orderId) // .parent.workflowId), failedTaskName: .parent.failedReferenceTaskNames[0] }
 ```
 
 其中 `parent` 是 `${workflow.input.failedWorkflow}`。這個表達式做兩件事：
 
-1. **`orderId`**：優先用主 workflow `output.orderId`；若失敗時尚未計算 output，則從
-   `tasks` 裡找 `order_food_ref` 的 `outputData.orderId`。兩者都取不到時為 `null`。
-2. **`failedTaskName`**：取 `failedReferenceTaskNames[0]`，即第一個失敗 task 的
-   `taskReferenceName`。
+1. **`orderId`**：依序取主 workflow `output.orderId`、`tasks` 裡 `order_food_ref` 的
+   `outputData.orderId`、最後是 `parent.workflowId`（新增，#137）。第三個來源是關鍵：
+   `order_food` 逾時時前兩者都取不到，但訂單可能已以 `workflowId` 建立。
+2. **`failedTaskName`**：取 `failedReferenceTaskNames[0]`，**只用於診斷**，不再決定補償內容
+   （#136–#139）。
 
 `JSON_JQ_TRANSFORM` 的輸出會包在 `result` 底下，因此下游運算式是
 `${extract_failure_context_ref.output.result.orderId}` 與
 `${extract_failure_context_ref.output.result.failedTaskName}`。
 
-### 3.3 SWITCH 分支與補償內容
+### 3.3 補償內容：不看失敗點，一律反向取消
 
-`switch_compensate_from` 使用 `evaluatorType: value-param`，以
-`failedTaskName` 為分支鍵。分支名稱都是主 workflow 真實存在的
-`taskReferenceName`：
+補償 workflow **沒有 SWITCH**。#136–#139 之前它以 `failedReferenceTaskNames[0]` 選分支，
+但該集合是 Java `HashSet`、含已被重試的失敗嘗試、且不含 `TIMED_OUT` 的 task，因此會選錯分支
+或什麼都不補償（反例見 `specs/saga.qnt` 的 `saga_switch`）。
 
-| `failedTaskName` | 補償順序 | 補償的已完成步驟 |
-| --- | --- | --- |
-| `check_inventory_ref` | `cancel_order` | 只補償 `order_food` 建立的訂單 |
-| `make_payment_ref` | `cancel_payment` → `cancel_order` | 訂單、付款（含付款失敗時已留下的付款紀錄，若有） |
-| `ship_food_ref` | `cancel_payment` → `cancel_order` | 訂單、付款；出貨失敗的處理見 §3.4 |
-| `notify_driver_ref` | `cancel_delivery` → `cancel_payment` → `cancel_order` | 訂單、付款、外送單 |
-| `notify_customer_ref` | `cancel_delivery` → `cancel_payment` → `cancel_order` | 訂單、付款、外送單 |
-| 其他（含 `order_food_ref`） | `defaultCase`：不補償 | 無 |
+現行做法：依正向步驟的反序，一律執行
 
-補償順序與正向步驟相反（Saga 慣例）：先取消最晚完成的外送單，再取消付款，最後取消訂單。
-`defaultCase` 是空陣列；`order_food` 失敗時 worker 不輸出 `orderId`，補償流程沒有可定址的
-已完成步驟，因此不執行補償。
+| 順序 | 補償 task | 帶入 | 為什麼不需要判斷 |
+| --- | --- | --- | --- |
+| 1 | `cancel_delivery` | `orderId`、`allowMissing=true` | 沒有外送單時是 no-op |
+| 2 | `cancel_payment` | `orderId`、`allowMissing=true` | 沒有付款時是 no-op |
+| 3 | `cancel_order` | `orderId`、`allowMissing=true` | 沒有訂單時是 no-op |
 
-SWITCH 之後接續執行最後的 `notify_customer`（`notify_customer_failure_ref`），
-帶入 `orderId`、`customerEmail`、`customerName`，用來通知失敗；此步驟同樣是 placeholder，
+最後執行 `notify_customer`（`notify_customer_failure_ref`），帶入 `orderId`、
+`customerEmail`、`customerName`，用來通知失敗；此步驟同樣是 placeholder，
 **不實際寄送通知**（見 §4.6）。
 
-### 3.4 為什麼 `ship_food` 失敗不呼叫 `cancel_delivery`
+`allowMissing=true` 讓 `cancel_*` 在「影響 0 列」時回 `COMPLETED` 而不是終端錯誤（§4.3）。
+這消除了「補償取消不存在的資料而中斷」這類缺陷（`ab60ba5` 修掉的是其中一例）。
+代價是補償會對從未建立的資料發出取消，日誌上多幾筆 no-op。
 
-`ship_food` 的失敗路徑已經在 `ShipmentService.createShipment` 內處理外送單：
+### 3.4 `ship_food` 失敗時的出貨單
 
-- `insertShipment` 失敗時，資料庫沒有建立 shipment，沒有東西可取消。
+`ShipmentService.createShipment` 在黑名單路徑上自行處理外送單：
+
+- `insertShipment` 失敗時，資料庫沒有建立 shipment。
 - shipment 建立後若找不到可用司機，`createShipment` 會先呼叫
   `shipmentDAO.cancelShipment(orderId)` 把該筆 shipment 標為 `CANCELED`，再回傳 `0`。
+- **但**若 `confirmShipment` 拋出 `DataAccessException`，shipment 會停在 `SCHEDULED`
+  而沒有任何地方取消它（#139 缺陷 D）。
 
-因此 `ship_food_ref` 分支只需要補償已完成且仍有效的付款與訂單，不再重複呼叫
-`cancel_delivery`；這也是 `PROVENANCE.md` §4 補償對照表中「不重複取消出貨」的理由。
-相對地，`notify_driver_ref`／`notify_customer_ref` 分支發生時 `ship_food` 已經成功、
-外送單仍有效，所以這兩個分支會先 `cancel_delivery`。
+現行補償一律執行 `cancel_delivery`，最後一種情況因此被涵蓋；前兩種情況則由
+`allowMissing` 視為 no-op。`ShipmentService` 不再需要額外的自我清理。
 
 ### 3.5 補償的實際效果與限制
 
@@ -210,10 +211,14 @@ SWITCH 之後接續執行最後的 `notify_customer`（`notify_customer_failure_
 | `cancel_order` | 把 `orders.status` 改為 `CANCELLED` | 不刪除 `orders_details`、不回滾 `customers` |
 
 補償是**狀態補償**，不是資料刪除或資料庫交易回滾。補償 task 的回傳狀態與重試設定
-決定後續行為：資料庫例外回 `FAILED`（可重試），查無目標回
+決定後續行為：資料庫例外回 `FAILED`（可重試），查無目標且未帶 `allowMissing` 時回
 `FAILED_WITH_TERMINAL_ERROR`（不重試）；三個 `cancel_*` 的 `retryCount` 都是 `3`
-（見 §4.5）。補償 workflow 本身沒有額外宣告 `onFailure` 或 SWITCH 的失敗分支，
-重試耗盡後的最終狀態由 Conductor 的 workflow 語意決定。
+（見 §4.5）。補償 workflow 本身沒有額外宣告 `onFailure`，重試耗盡後的最終狀態由
+Conductor 的 workflow 語意決定。
+
+補償 workflow 仍可能因基礎設施故障而失敗（資料庫例外重試耗盡）。`specs/saga.qnt` 把
+這點寫成不變量 `inv_compensation_failure_only_from_env`：補償失敗只允許由環境故障造成，
+設計錯誤造成的失敗則視為缺陷。
 
 ## 4. 9 個 worker 的職責與失敗語意
 
@@ -241,12 +246,13 @@ SWITCH 之後接續執行最後的 `notify_customer`（`notify_customer_failure_
 
 | Task | 方法 | 補償動作 | `COMPLETED` | 失敗語意 |
 | --- | --- | --- | --- | --- |
-| `cancel_payment` | `cancelPaymentTask` | `PaymentService.cancelPayment`：同一 `orderId` 的所有付款改為 `CANCELED` | 受影響列數 > 0 | 查無付款 → `FAILED_WITH_TERMINAL_ERROR`，原因 `No payment found for order <orderId>`；資料庫例外 → `FAILED`，原因含 `Failed to cancel payment for order <orderId>: <message>` |
-| `cancel_delivery` | `cancelDeliveryTask` | `ShipmentService.cancelDelivery`：同一 `orderId` 的 shipment 改為 `CANCELED` | 受影響列數 > 0 | 查無外送單 → `FAILED_WITH_TERMINAL_ERROR`，原因 `No shipment found for order <orderId>`；資料庫例外 → `FAILED`，原因含 `Failed to cancel delivery for order <orderId>: <message>` |
-| `cancel_order` | `cancelOrderTask` | `OrderService.cancelOrder`：`orders.status` 改為 `CANCELLED` | 受影響列數 > 0 | 查無訂單 → `FAILED_WITH_TERMINAL_ERROR`，原因 `No order found for order <orderId>`；資料庫例外 → `FAILED`，原因含 `Failed to cancel order for order <orderId>: <message>` |
+| `cancel_payment` | `cancelPaymentTask` | `PaymentService.cancelPayment`：同一 `orderId` 的所有付款改為 `CANCELED` | 受影響列數 > 0，或 `allowMissing=true` | 未帶 `allowMissing` 且查無付款 → `FAILED_WITH_TERMINAL_ERROR`，原因 `No payment found for order <orderId>`；資料庫例外 → `FAILED`，原因含 `Failed to cancel payment for order <orderId>: <message>` |
+| `cancel_delivery` | `cancelDeliveryTask` | `ShipmentService.cancelDelivery`：同一 `orderId` 的 shipment 改為 `CANCELED` | 受影響列數 > 0，或 `allowMissing=true` | 未帶 `allowMissing` 且查無外送單 → `FAILED_WITH_TERMINAL_ERROR`，原因 `No shipment found for order <orderId>`；資料庫例外 → `FAILED` |
+| `cancel_order` | `cancelOrderTask` | `OrderService.cancelOrder`：`orders.status` 改為 `CANCELLED` | 受影響列數 > 0，或 `allowMissing=true` | 未帶 `allowMissing` 且查無訂單 → `FAILED_WITH_TERMINAL_ERROR`，原因 `No order found for order <orderId>`；資料庫例外 → `FAILED` |
 
-三個補償 worker 都回傳 `TaskResult`，因此能明確回報 `COMPLETED`、`FAILED` 或
-`FAILED_WITH_TERMINAL_ERROR`；失敗原因一律寫入 `reasonForIncompletion`。
+三個補償 worker 共用同一個流程（`ConductorWorkers.cancel`），都回傳 `TaskResult`，
+失敗原因一律寫入 `reasonForIncompletion`。`orderId` 空白時一律回
+`FAILED_WITH_TERMINAL_ERROR`，即使帶了 `allowMissing`：沒有 id 就無從判斷是否真的已取消。
 
 ### 4.4 狀態語意
 
@@ -303,10 +309,10 @@ SWITCH 之後接續執行最後的 `notify_customer`（`notify_customer_failure_
 | --- | --- | --- |
 | 1 | 每個 `type: SIMPLE` 的 task `name` 都有對應的 `@WorkerTask` | JSON 不會引用不存在的 worker |
 | 2 | 每個 `@WorkerTask` 都被某個 workflow 使用，且 `conductor/taskdefs/` 有同名檔案、`name` 欄位一致 | 沒有孤兒 worker、沒有漏掉的 TaskDef |
-| 3 | 同一 workflow 內 `taskReferenceName` 不重複（含 FORK 與 SWITCH 分支） | 下游 `${ref.output...}` 不會指向錯誤的 task |
+| 3 | 同一 workflow 內 `taskReferenceName` 不重複（含 FORK 分支） | 下游 `${ref.output...}` 不會指向錯誤的 task |
 | 4 | 每個 SIMPLE task 的 `inputParameters` key 都是該 worker 參數 POJO 的欄位 | JSON 不會傳入 worker 不認得的欄位 |
-| 5 | 每個 `${...}` 都解析得到：`workflow.input` key 對 `WorkflowService` 的實際起始輸入（failure workflow 則對自身宣告的 `inputParameters`）；`<ref>.output.<key>` 對 worker 實際輸出；JQ 的 `result.<key>` 對 `queryExpression` 產出的欄位 | 沒有斷掉的輸入／輸出引用 |
-| 6 | 補償 workflow 的每個 SWITCH 分支名稱都是主 workflow 真實存在的 `taskReferenceName` | 補償分支不會因 ref 改名而失效 |
+| 5 | 每個 `${...}` 都解析得到：`workflow.input` key 對 `WorkflowService` 的實際起始輸入（failure workflow 則對自身宣告的 `inputParameters`）；`<ref>.output.<key>` 對 worker 實際輸出；JQ 的 `result.<key>` 對 `queryExpression` 產出的欄位。白名單 `workflow.workflowId` 是 Conductor 執行期屬性 | 沒有斷掉的輸入／輸出引用 |
+| 6 | 補償 workflow 若有 SWITCH，每個分支名稱都是主 workflow 真實存在的 `taskReferenceName`（現行定義已無 SWITCH） | 補償分支不會因 ref 改名而失效 |
 | 7 | `WorkflowService` 啟動的名稱與版本，和 JSON 定義的 `name`、`version` 一致 | 應用不會啟動到錯誤的定義版本 |
 
 第 5 項的 worker 輸出 key 是從 `ConductorWorkers.java` 原始檔解析

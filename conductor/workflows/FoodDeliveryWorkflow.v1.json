@@ -26,6 +26,7 @@
       "taskReferenceName": "order_food_ref",
       "type": "SIMPLE",
       "inputParameters": {
+        "orderId": "${workflow.workflowId}",
         "customerEmail": "${workflow.input.customerEmail}",
         "customerName": "${workflow.input.customerName}",
         "customerContact": "${workflow.input.customerContact}",

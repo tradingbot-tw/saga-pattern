@@ -17,10 +17,15 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 驗證針對 Quint 形式規格反例所做的修正：
- * 1. 工作流層級：FoodDeliveryFailureWorkflow.v1.json 在 make_payment_ref 失敗時不再無效呼叫 cancel_payment。
- * 2. 業務層級：make_payment 失敗時正確依序回滾 cancel_order，確保訂單狀態成功轉為 CANCELLED，達成最終一致性。
- * 3. 安全防護：查無訂單時仍具備終端錯誤防護，防止無效 ID 誤報成功。
+ * 驗證針對 Quint 形式規格反例所做的修正（specs/saga_test.qnt 的
+ * {@code defect_prefix_payment_insert_failure_test}；該反例只在 insertPayment 失敗、沒有付款列時出現，
+ * 付款被拒時已有 FAILED 付款列，舊 workflow 的 cancel_payment 仍會成功）：
+ * 1. 工作流層級：ab60ba5 先拿掉 make_payment_ref 分支的 cancel_payment；#136–#139 之後補償 workflow 不再用 SWITCH，
+ *    一律反向取消，每個 cancel_* 都帶 allowMissing=true，查無付款不會中斷補償。
+ * 2. 業務層級：make_payment 失敗時 cancel_order 確保訂單狀態成功轉為 CANCELLED，達成最終一致性。
+ * 3. 安全防護：未帶 allowMissing 時，查無訂單仍回終端錯誤，防止無效 ID 誤報成功。
+ *
+ * <p>A–D 的情境見 {@link SagaCompensationDefectTest} 與 specs/README.md。
  */
 class SagaFlawReproductionTest {
 
@@ -58,22 +63,30 @@ class SagaFlawReproductionTest {
     }
 
     @Test
-    @DisplayName("工作流修復驗證：FoodDeliveryFailureWorkflow 在 make_payment_ref 分支不再包含 cancel_payment")
-    void verifyWorkflowDefinitionNoLongerInvokesCancelPaymentOnPaymentFailure() throws Exception {
+    @DisplayName("工作流修復驗證：補償 workflow 對付款呼叫 cancel_payment 時帶 allowMissing，查無付款不會中斷補償")
+    void verifyWorkflowDefinitionNeverFailsOnMissingPayment() throws Exception {
         File workflowFile = new File("conductor/workflows/FoodDeliveryFailureWorkflow.v1.json");
         assertTrue(workflowFile.exists(), "FoodDeliveryFailureWorkflow.v1.json 必須存在");
 
         JsonNode root = MAPPER.readTree(workflowFile);
-        JsonNode switchTask = root.path("tasks").get(1); // switch_compensate_from
-        assertEquals("switch_compensate_from", switchTask.path("name").asText());
+        boolean cancelPaymentFound = false;
+        for (JsonNode task : root.path("tasks")) {
+            assertNotEquals("SWITCH", task.path("type").asText(),
+                    "#136–#139：補償內容不得依賴 failedReferenceTaskNames[0] 的 SWITCH");
+            if (task.path("name").asText().startsWith("cancel_")) {
+                assertTrue(task.path("inputParameters").path("allowMissing").asBoolean(false),
+                        task.path("taskReferenceName").asText() + " 必須帶 allowMissing=true");
+                cancelPaymentFound |= "cancel_payment".equals(task.path("name").asText());
+            }
+        }
+        assertTrue(cancelPaymentFound, "補償 workflow 應取消付款");
 
-        JsonNode paymentBranch = switchTask.path("decisionCases").path("make_payment_ref");
-        assertNotNull(paymentBranch, "make_payment_ref 分支必須存在");
-
-        // 驗證 make_payment_ref 下只有 cancel_order，無 cancel_payment
-        assertEquals(1, paymentBranch.size(), "make_payment_ref 分支應僅有 1 個補償步驟（cancel_order）");
-        assertEquals("cancel_order", paymentBranch.get(0).path("name").asText(),
-                "make_payment_ref 失敗時應僅補償 cancel_order，不應調用未產生的 cancel_payment");
+        // 舊缺陷的根因：查無付款時 cancel_payment 回終端錯誤。allowMissing 下必須完成。
+        CancelRequest noPayment = new CancelRequest();
+        noPayment.setOrderId(SagaTestDb.uniqueId("no-payment"));
+        noPayment.setAllowMissing(true);
+        assertEquals(TaskResult.Status.COMPLETED, workers.cancelPaymentTask(noPayment).getStatus(),
+                "make_payment 未寫入付款時，補償的 cancel_payment 應為 no-op");
     }
 
     @Test
@@ -93,10 +106,11 @@ class SagaFlawReproductionTest {
         assertEquals(TaskResult.Status.COMPLETED, inventoryResult.getStatus());
 
         // 3. 步驟 3: make_payment 任務失敗（未落庫成功）
-        // 依據修復後的 FoodDeliveryFailureWorkflow.v1.json 定義：
-        // make_payment_ref 失敗分支不再呼叫 cancel_payment，直接執行 cancel_order
+        // 依據現行 FoodDeliveryFailureWorkflow.v1.json：一律反向取消，cancel_payment 查無付款為 no-op，
+        // 接著 cancel_order（allowMissing=true）
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
+        cancelRequest.setAllowMissing(true);
 
         TaskResult cancelOrderResult = workers.cancelOrderTask(cancelRequest);
         assertEquals(TaskResult.Status.COMPLETED, cancelOrderResult.getStatus(),
