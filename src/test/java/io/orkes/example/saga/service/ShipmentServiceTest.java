@@ -1,10 +1,12 @@
 package io.orkes.example.saga.service;
 
 import io.orkes.example.saga.SagaTestDb;
+import io.orkes.example.saga.dao.DataAccessException;
 import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.Shipment;
 import io.orkes.example.saga.pojos.ShippingRequest;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +22,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -35,6 +38,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 無法注入，因此本測試沿用應用的資料庫檔（.gitignore 已排除）並以唯一 orderId 隔離各情境。
  * 「找不到司機」以既有資料操作達成：暫時移除 {@code findDriver()} 可能抽到的司機列
  * （id 1–3；id 0 本來就不存在），不動 {@code findDriver()} 的實作，結束後於 finally 還原。
+ *
+ * <p>Issue #84 新增「確認失敗」情境：以 SQLite {@code BEFORE UPDATE} TRIGGER 讓
+ * {@code confirmShipment} 的 UPDATE abort，驗證 {@code createShipment} 必須把資料庫失敗
+ * 往外傳（拋 {@link DataAccessException}），不得在外送單仍停在 {@code SCHEDULED} 時回傳
+ * {@code driverId}。
  */
 class ShipmentServiceTest {
 
@@ -149,6 +157,32 @@ class ShipmentServiceTest {
 
         assertEquals(0, shipmentCount(orderId), "寫入失敗不應留下部分寫入的外送紀錄");
         assertNull(statusOf(orderId), "沒有外送紀錄就沒有狀態");
+    }
+
+    @Test
+    @Disabled("Issue #84 紅燈測試：既有缺陷——ShipmentDAO.confirmShipment 吞掉 SQLException，"
+            + "createShipment 在外送單仍停在 SCHEDULED 時誤回傳 driverId；於 02-impl 修復層啟用")
+    @DisplayName("確認失敗：confirmShipment 的 UPDATE 被拒時 createShipment 必須拋 DataAccessException，不得標成 CONFIRMED")
+    void createShipmentPropagatesConfirmFailure() throws SQLException {
+        String orderId = SagaTestDb.uniqueId("order");
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_confirm_shipment BEFORE UPDATE ON shipments "
+                    + "WHEN NEW.status = 'CONFIRMED' BEGIN SELECT RAISE(ABORT, 'simulated confirm db failure'); END");
+            try {
+                assertThrows(DataAccessException.class,
+                        () -> ShipmentService.createShipment(shippingRequest(orderId)),
+                        "確認失敗必須往外拋 DataAccessException（或回傳 0），不得回傳 driverId 讓 worker 誤判成功");
+
+                assertEquals(Shipment.Status.SCHEDULED.name(), statusOf(orderId),
+                        "確認失敗後該 orderId 的狀態不得為 CONFIRMED，應停留在 SCHEDULED");
+                assertNotEquals(Shipment.Status.CONFIRMED.name(), statusOf(orderId),
+                        "確認失敗不得讓出貨單被標為 CONFIRMED");
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_confirm_shipment");
+            }
+        }
     }
 
     @Test

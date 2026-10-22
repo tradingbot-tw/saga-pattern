@@ -3,8 +3,7 @@ package io.orkes.example.saga.workers;
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.dao.ShipmentDAO;
-import io.orkes.example.saga.pojos.CancelRequest;
-import io.orkes.example.saga.pojos.CheckInventoryRequest;
+import io.orkes.example.saga.pojos.CancelRequest;import io.orkes.example.saga.pojos.CheckInventoryRequest;
 import io.orkes.example.saga.pojos.CustomerNotificationRequest;
 import io.orkes.example.saga.pojos.DriverNotificationRequest;
 import io.orkes.example.saga.pojos.FoodItem;
@@ -18,6 +17,7 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -200,6 +200,37 @@ class ConductorWorkersTest {
         assertEquals(TaskResult.Status.FAILED, result.getStatus());
         assertFalse(result.getOutputData().containsKey("driverId"),
                 "失敗時不得輸出 driverId，避免下游把未指派的司機當成有效值");
+    }
+
+    @Test
+    @Disabled("Issue #84 紅燈測試：既有缺陷——confirmShipment 的資料庫失敗被 DAO 吞掉，"
+            + "shipFoodTask 在外送單仍停在 SCHEDULED 時誤報 COMPLETED；於 02-impl 修復層啟用")
+    @DisplayName("重試語義：ship_food 確認失敗時回傳 FAILED 並帶原因，不得輸出 driverId")
+    void shipFoodFailsRetryablyWhenConfirmShipmentFails() throws Exception {
+        ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_confirm_shipment_worker BEFORE UPDATE ON shipments "
+                    + "WHEN NEW.status = 'CONFIRMED' BEGIN SELECT RAISE(ABORT, 'simulated confirm db failure'); END");
+            try {
+                TaskResult result = workers.shipFoodTask(request);
+
+                assertEquals(TaskResult.Status.FAILED, result.getStatus(),
+                        "資料庫確認失敗是可重試的 FAILED，不得回報 COMPLETED，也不是 terminal error");
+                assertFalse(result.getOutputData().containsKey("driverId"),
+                        "確認失敗時不得輸出 driverId，避免下游 notify_driver 誤用未確認的指派");
+                assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion");
+                assertTrue(result.getReasonForIncompletion().contains("simulated confirm db failure"),
+                        "原因應保留資料庫錯誤訊息，實際為: " + result.getReasonForIncompletion());
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_confirm_shipment_worker");
+            }
+        }
+
+        assertEquals(Shipment.Status.SCHEDULED.name(), SagaTestDb.queryString(URL,
+                "SELECT status FROM shipments WHERE orderId = '" + request.getOrderId() + "'"),
+                "確認失敗不得讓出貨單被標為 CONFIRMED，應停留在 SCHEDULED 供後續處置");
     }
 
     @Test
