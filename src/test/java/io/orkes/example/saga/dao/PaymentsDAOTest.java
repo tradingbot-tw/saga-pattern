@@ -6,7 +6,6 @@ import io.orkes.example.saga.pojos.PaymentDetails;
 import io.orkes.example.saga.pojos.PaymentMethod;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -68,7 +67,6 @@ class PaymentsDAOTest {
     }
 
     @Test
-    @Disabled("Issue #83：重現明碼落庫的紅燈測試；02-impl 修正後移除本標記")
     @DisplayName("Issue #83：method 欄只存 type 與卡號後四碼，不含完整卡號、CVV、到期日")
     void insertPaymentStoresMaskedPaymentMethod() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");
@@ -89,7 +87,6 @@ class PaymentsDAOTest {
     }
 
     @Test
-    @Disabled("Issue #83：重現明碼落庫的紅燈測試；02-impl 修正後移除本標記")
     @DisplayName("Issue #83：無卡號時 method 欄只存 type")
     void insertPaymentStoresOnlyTypeWhenNoCardNumber() throws Exception {
         String orderId = SagaTestDb.uniqueId("order");

@@ -1,6 +1,8 @@
 package io.orkes.example.saga.dao;
 
 import io.orkes.example.saga.pojos.Payment;
+import io.orkes.example.saga.pojos.PaymentDetails;
+import io.orkes.example.saga.pojos.PaymentMethod;
 
 import java.sql.*;
 import java.util.Date;
@@ -9,6 +11,33 @@ public class PaymentsDAO extends BaseDAO {
 
     public PaymentsDAO(String url) {
         super(url);
+    }
+
+    /**
+     * 產生寫入 {@code payments.method} 的稽核字串（Issue #83）。
+     *
+     * <p>只保留付款方式 {@code type} 與卡號後四碼，例如 {@code "Credit Card ****1111"}；
+     * 沒有卡號時只回傳 {@code type}。完整卡號、{@code cvv} 與 {@code expiry} 一律不寫入。
+     */
+    static String toAuditMethodString(PaymentMethod method) {
+        if (method == null) {
+            return "";
+        }
+
+        String type = method.getType() == null ? "" : method.getType().trim();
+        PaymentDetails details = method.getDetails();
+        String number = details == null ? null : details.getNumber();
+        if (number == null) {
+            return type;
+        }
+
+        String digits = number.replaceAll("\\D", "");
+        if (digits.length() <= 4) {
+            return type;
+        }
+
+        String suffix = "****" + digits.substring(digits.length() - 4);
+        return type.isEmpty() ? suffix : type + " " + suffix;
     }
 
     public String insertPayment(Payment payment) {
@@ -21,7 +50,7 @@ public class PaymentsDAO extends BaseDAO {
             pstmt.setString(1, payment.getPaymentId());
             pstmt.setString(2, payment.getOrderId());
             pstmt.setDouble(3, payment.getAmount());
-            pstmt.setString(4, payment.getPaymentMethod().toString());
+            pstmt.setString(4, toAuditMethodString(payment.getPaymentMethod()));
             pstmt.setTimestamp(5, nowAsTS);
             pstmt.setString(6, payment.getStatus().name());
             pstmt.executeUpdate();
