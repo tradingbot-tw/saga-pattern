@@ -23,6 +23,8 @@ repositories {
 dependencies {
     testImplementation platform('org.junit:junit-bom:5.9.1')
     testImplementation 'org.junit.jupiter:junit-jupiter'
+    // 補償 workflow 重現測試：以 Conductor 伺服器同一套 JQ 實作執行 JSON_JQ_TRANSFORM
+    testImplementation 'net.thisptr:jackson-jq:1.0.0'
 
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'io.orkes.conductor:orkes-conductor-client:2.1.0'

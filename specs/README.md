@@ -71,15 +71,24 @@ quint run specs/saga.qnt --main=saga_current --max-steps=20 --max-samples=5000 \
 
 ## 已知缺陷
 
-以下都是規格找到的反例，各有一個 `defect_*` 測試重現。這些測試斷言不變量**被違反**；缺陷修好後要改寫成斷言不變量成立。
+以下都是規格找到的反例，各有兩個重現測試：
 
-| 缺陷 | 情境 | 殘留 | 測試 |
-|---|---|---|---|
-| 舊缺陷（已由 `ab60ba5` 修正） | 修正前 workflow：`insertPayment` 失敗（沒有付款列）→ `cancel_payment` 查無資料 → 終端錯誤 → 補償中斷 | 訂單 | `defect_prefix_payment_insert_failure_test` |
-| A：重試留下的失敗紀錄讓 SWITCH 選錯分支 | `check_inventory` 失敗一次後重試成功，之後 `ship_food` 失敗；集合 `{check_inventory_ref, ship_food_ref}` 的 `[0]` 可能是 `check_inventory_ref` | 付款 | `defect_a_wrong_branch_after_retry_test` |
-| B：逾時後完全不補償 | `make_payment` 已扣款但回報逾時；`TIMED_OUT` 不進集合 → `defaultCase` | 訂單、付款 | `defect_b_timeout_skips_compensation_test` |
-| C：JOIN 競態（依原始碼推論，未在 Orkes 實測） | 並行分支失敗時 JOIN 也標成 `FAILED`；`[0]` 可能是 `notify_join_ref` → `defaultCase` | 訂單、付款、出貨 | `defect_c_join_race_skips_compensation_test` |
-| D：`SCHEDULED` 出貨單殘留 | `confirmShipment` 拋出資料庫例外，列停在 `SCHEDULED`；`ship_food_ref` 分支沒有 `cancel_delivery` | 出貨單 | `defect_d_scheduled_shipment_left_test` |
+- **Quint**（[`saga_test.qnt`](saga_test.qnt) 的 `defect_*`）：斷言不變量**被違反**；缺陷修好後要改寫成斷言不變量成立。
+- **Java**（[`SagaCompensationDefectTest`](../src/test/java/io/orkes/example/saga/workers/SagaCompensationDefectTest.java) 的 `defect*`）：斷言**正確的 Saga 一致性**，所以在缺陷修好之前會紅燈。正向步驟呼叫真實 worker 寫入 SQLite；資料庫錯誤用 SQLite trigger 注入真實程式碼路徑；Conductor 的重試、逾時、JOIN 競態用 Conductor 自己的 `Workflow`／`Task` 物件表達，`failedReferenceTaskNames` 照 conductor-oss 的規則填入 `HashSet`；補償 workflow 由 [`FailureWorkflowHarness`](../src/test/java/io/orkes/example/saga/workers/FailureWorkflowHarness.java) 照版控中的 JSON 執行（JQ 用 jackson-jq）。兩個 `control_*` 對照組應通過，用來確認紅燈來自缺陷而不是 harness。
+
+| 缺陷 | 情境 | 殘留 | Quint 測試 | Java 測試 |
+|---|---|---|---|---|
+| 舊缺陷（已由 `ab60ba5` 修正） | 修正前 workflow：`insertPayment` 失敗（沒有付款列）→ `cancel_payment` 查無資料 → 終端錯誤 → 補償中斷 | 訂單 | `defect_prefix_payment_insert_failure_test` | （已修正） |
+| A：重試留下的失敗紀錄讓 SWITCH 選錯分支 | `check_inventory` 失敗一次後重試成功，之後 `ship_food` 失敗；集合 `{check_inventory_ref, ship_food_ref}` 的 `[0]` 是 `check_inventory_ref` | 付款 | `defect_a_wrong_branch_after_retry_test` | `defectA_retriedCheckInventoryMakesSwitchPickWrongBranch` |
+| B：逾時後完全不補償 | `make_payment` 已扣款但回報逾時；`TIMED_OUT` 不進集合 → `defaultCase` | 訂單、付款 | `defect_b_timeout_skips_compensation_test` | `defectB_timedOutTaskIsNotInFailedSetSoNothingIsCompensated` |
+| C：JOIN 競態（依原始碼推論，未在 Orkes 實測） | 並行分支失敗時 JOIN 也標成 `FAILED`；`[0]` 是 `notify_join_ref` → `defaultCase` | 訂單、付款、出貨 | `defect_c_join_race_skips_compensation_test` | `defectC_failedJoinHidesTheFailedBranch` |
+| D：`SCHEDULED` 出貨單殘留 | `confirmShipment` 拋出資料庫例外，列停在 `SCHEDULED`；`ship_food_ref` 分支沒有 `cancel_delivery` | 出貨單 | `defect_d_scheduled_shipment_left_test` | `defectD_scheduledShipmentIsNotCanceled` |
+
+Java 重現（`JAVA_HOME` 需為 JDK 17 或 21；JDK 25 會在 Lombok 編譯階段失敗）：
+
+```bash
+./gradlew test --tests 'io.orkes.example.saga.workers.SagaCompensationDefectTest'
+```
 
 舊缺陷只在 `insertPayment` 失敗時出現。付款被拒是較常見的路徑，此時已有一筆 `FAILED` 付款列，`cancel_payment` 會成功（`prefix_payment_declined_compensates_test`）。
 
