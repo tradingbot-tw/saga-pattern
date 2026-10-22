@@ -6,6 +6,7 @@ import io.orkes.example.saga.pojos.PaymentDetails;
 import io.orkes.example.saga.pojos.PaymentMethod;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +14,7 @@ import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -57,6 +59,58 @@ class PaymentsDAOTest {
         payment.setPaymentMethod(method);
         payment.setStatus(Payment.Status.PENDING);
         return payment;
+    }
+
+    /** 讀回 {@code payments.method} 欄位的原始文字（Issue #83：此欄不得再存完整卡號／CVV）。 */
+    private static String storedMethod(Payment payment) throws Exception {
+        return SagaTestDb.queryString(url,
+                "SELECT method FROM payments WHERE paymentId = '" + payment.getPaymentId() + "'");
+    }
+
+    @Test
+    @Disabled("Issue #83：重現明碼落庫的紅燈測試；02-impl 修正後移除本標記")
+    @DisplayName("Issue #83：method 欄只存 type 與卡號後四碼，不含完整卡號、CVV、到期日")
+    void insertPaymentStoresMaskedPaymentMethod() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        Payment payment = pendingPayment(orderId);
+        String number = payment.getPaymentMethod().getDetails().getNumber();
+        String expiry = payment.getPaymentMethod().getDetails().getExpiry();
+        int cvv = payment.getPaymentMethod().getDetails().getCvv();
+
+        assertEquals("", dao.insertPayment(payment), "insertPayment 成功時應回傳空字串");
+
+        String stored = storedMethod(payment);
+        assertNotNull(stored, "付款寫入後 method 欄必須有值");
+        assertFalse(stored.contains(number), "method 欄不得包含完整卡號，實際為: " + stored);
+        assertFalse(stored.contains(String.valueOf(cvv)), "method 欄不得包含 CVV，實際為: " + stored);
+        assertFalse(stored.contains(expiry), "method 欄不得包含到期日，實際為: " + stored);
+        assertTrue(stored.contains("Credit Card"), "method 欄應保留付款方式 type，實際為: " + stored);
+        assertTrue(stored.contains("1111"), "method 欄應保留卡號後四碼，實際為: " + stored);
+    }
+
+    @Test
+    @Disabled("Issue #83：重現明碼落庫的紅燈測試；02-impl 修正後移除本標記")
+    @DisplayName("Issue #83：無卡號時 method 欄只存 type")
+    void insertPaymentStoresOnlyTypeWhenNoCardNumber() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        PaymentDetails details = new PaymentDetails();
+        details.setExpiry("12/2099");
+        details.setCvv(0);
+
+        PaymentMethod method = new PaymentMethod();
+        method.setType("Cash");
+        method.setDetails(details);
+
+        Payment payment = new Payment();
+        payment.setPaymentId(SagaTestDb.uniqueId("payment"));
+        payment.setOrderId(orderId);
+        payment.setAmount(10.0);
+        payment.setPaymentMethod(method);
+        payment.setStatus(Payment.Status.PENDING);
+
+        assertEquals("", dao.insertPayment(payment), "insertPayment 成功時應回傳空字串");
+
+        assertEquals("Cash", storedMethod(payment), "沒有卡號時 method 欄只應存 type");
     }
 
     @Test
