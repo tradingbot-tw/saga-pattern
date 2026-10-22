@@ -13,6 +13,7 @@ import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -163,5 +164,58 @@ class PaymentsDAOTest {
         for (Payment.Status status : Payment.Status.values()) {
             assertEquals(status, Payment.Status.valueOf(status.name()));
         }
+    }
+
+    @Test
+    @DisplayName("敏感資料（Issue #83）：落庫的 method 只保留類型與卡號後四碼，不含完整卡號、到期日或 cvv")
+    void insertPaymentStoresMaskedMethodOnly() throws Exception {
+        String orderId = SagaTestDb.uniqueId("masked-order");
+        Payment payment = pendingPayment(orderId);
+
+        assertEquals("", dao.insertPayment(payment), "前置條件：寫入應成功");
+
+        String stored = SagaTestDb.queryString(url,
+                "SELECT method FROM payments WHERE paymentId = '" + payment.getPaymentId() + "'");
+        assertNotNull(stored, "method 欄位應有值");
+        assertEquals("Credit Card ****1111", stored, "只保留類型與卡號後四碼");
+
+        // 逐項斷言：完整卡號、cvv、到期日都不得出現
+        assertFalse(stored.contains("4111111111111111"), "不得寫入完整卡號，實際為: " + stored);
+        assertFalse(stored.contains("123"), "不得寫入 cvv，實際為: " + stored);
+        assertFalse(stored.contains("12/2099"), "不得寫入到期日，實際為: " + stored);
+        assertTrue(stored.contains("****"), "卡號應以遮罩表示，實際為: " + stored);
+    }
+
+    @Test
+    @DisplayName("敏感資料（Issue #83）：沒有卡號資訊的付款方式只落庫類型")
+    void insertPaymentStoresTypeOnlyWithoutDetails() throws Exception {
+        String orderId = SagaTestDb.uniqueId("cash-order");
+        Payment payment = pendingPayment(orderId);
+
+        PaymentMethod cash = new PaymentMethod();
+        cash.setType("Cash");
+        payment.setPaymentMethod(cash);
+
+        assertEquals("", dao.insertPayment(payment));
+        assertEquals("Cash", SagaTestDb.queryString(url,
+                "SELECT method FROM payments WHERE paymentId = '" + payment.getPaymentId() + "'"));
+    }
+
+    @Test
+    @DisplayName("敏感資料（Issue #83）：卡號過短或空白時只回傳遮罩，不透露任何位數")
+    void maskedNumberNeverLeaksShortOrBlankNumbers() {
+        PaymentDetails details = new PaymentDetails();
+
+        details.setNumber("12");
+        assertEquals("****", details.maskedNumber(), "長度不足四碼時不得透露位數");
+
+        details.setNumber("");
+        assertEquals("****", details.maskedNumber(), "空字串應回遮罩");
+
+        details.setNumber(null);
+        assertEquals("****", details.maskedNumber(), "null 應回遮罩");
+
+        details.setNumber("4111 1111 1111 1111");
+        assertEquals("****1111", details.maskedNumber(), "含空白的卡號應先去除空白再取後四碼");
     }
 }

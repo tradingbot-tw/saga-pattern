@@ -94,8 +94,10 @@ stateDiagram-v2
     1–12 依 JDK `SimpleDateFormat` 預設（lenient）進位。
 - **其他付款方式（如 `Cash`）不做任何檢查、直接核准**（`PaymentService.java:63,86`）。
   卡號、CVV、金額在任何路徑上都不參與驗證。
-- 「落庫」的 `method` 欄存的是 `PaymentMethod.toString()` 的文字序列化
-  （`PaymentsDAO.java:24`）；範例專案的測試值皆為樣板字串，不涉及真實憑證。
+- 「落庫」的 `method` 欄存的是 `PaymentMethod.toAuditString()`（Issue #83）：只有付款類型與
+  卡號後四碼，例如 `Credit Card ****1111`。**不會**寫入完整卡號、到期日或 `cvv`
+  （`PaymentsDAO.java:25`）。修正前存的是 Lombok `toString()` 的完整序列化，會把卡號與
+  `cvv` 一併落庫；既有資料庫中的舊資料不會被自動清理。」
 
 > ⚠️ 再次強調：上述驗證範圍刻意狹窄，屬教學用模擬。不得據本文件推論任何
 > 真實金流的核准、拒付或退款行為。
@@ -162,7 +164,7 @@ worker 層的三態翻譯（`COMPLETED`／`FAILED_WITH_TERMINAL_ERROR`／`FAILED
 | `paymentId` | text，PRIMARY KEY | UUID 字串（每次 `createPayment` 新產生，`PaymentService.java:23-27`） |
 | `orderId` | text NOT NULL | 來自 `PaymentRequest` |
 | `amount` | number NOT NULL | 來自 `PaymentRequest` |
-| `method` | text | `PaymentMethod.toString()` 文字序列化（`PaymentsDAO.java:24`） |
+| `method` | text | `PaymentMethod.toAuditString()`：類型＋卡號後四碼（`PaymentsDAO.java:25`）；不含完整卡號、到期日、`cvv`（Issue #83） |
 | `status` | text | `Payment.Status.name()`：`PENDING`／`SUCCESSFUL`／`FAILED`／`CANCELED` |
 | `createdAt` | TIMESTAMP NOT NULL | 插入當下時間（`PaymentsDAO.java:15-16,25`） |
 

@@ -21,7 +21,8 @@ public class PaymentsDAO extends BaseDAO {
             pstmt.setString(1, payment.getPaymentId());
             pstmt.setString(2, payment.getOrderId());
             pstmt.setDouble(3, payment.getAmount());
-            pstmt.setString(4, payment.getPaymentMethod().toString());
+            // Issue #83：落庫只留類型與卡號後四碼，不寫入完整卡號／到期日／cvv。
+            pstmt.setString(4, payment.getPaymentMethod().toAuditString());
             pstmt.setTimestamp(5, nowAsTS);
             pstmt.setString(6, payment.getStatus().name());
             pstmt.executeUpdate();
