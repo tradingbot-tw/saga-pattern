@@ -1,0 +1,42 @@
+conductor/PROVENANCE.md
+  h_a7614621effce7 47,49,51-59,71-72,86,92-101,106-107
+conductor/workflows/FoodDeliveryFailureWorkflow.v1.json
+  h_a7614621effce7 3,25,29-40,42-53
+conductor/workflows/FoodDeliveryWorkflow.v1.json
+  h_a7614621effce7 29
+docs/modules/workflow.md
+  h_a7614621effce7 14,70,81-82,84-86,147-148,155,160-164,170,172-174,176-185,188-192,194,196,199-200,202-203,214,216-221,249-251,253-255,312,314-315
+specs/README.md
+  h_a7614621effce7 11-12,14,21-23,27,32,56-57,63,70-71,74-75,77,79,81-85,87-90,93,97,99-101,107,110,116
+src/main/java/io/orkes/example/saga/pojos/CancelRequest.java
+  h_a7614621effce7 5-7,11-19
+src/main/java/io/orkes/example/saga/pojos/OrderRequest.java
+  h_a7614621effce7 9-15
+src/main/java/io/orkes/example/saga/service/OrderService.java
+  h_a7614621effce7 22-26
+src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java
+  h_a7614621effce7 18,160-173,175-176,178,183,187-191,194,199
+src/test/java/io/orkes/example/saga/e2e/OrkesCloudE2EVerificationTest.java
+  h_a7614621effce7 3-4,15,18,24-28,34-41,46,52-57,79-112,116-132,134-140,142-176,178-182,199,202-250,252-253,258-269,271-292,294-308,310-311,314,324-354
+src/test/java/io/orkes/example/saga/workers/ConductorWorkersTest.java
+  h_a7614621effce7 121-147,489-550
+src/test/java/io/orkes/example/saga/workers/FailureWorkflowHarness.java
+  h_a7614621effce7 95,101,169-172,177-179,183-185,187-188,197-220
+src/test/java/io/orkes/example/saga/workers/SagaCompensationDefectTest.java
+  h_a7614621effce7 38,40,45-49,80,84,87,96,100,103-104,106,110-125,129,133,135-137,141-143,145,149,153,157,159-161,164,167,171-186,190,194,197,208,212,216,219-220,222,226,243-244,254,258-262,265,267-268,271-272,274,284
+src/test/java/io/orkes/example/saga/workers/SagaFlawReproductionTest.java
+  h_a7614621effce7 23-26,28,66-67,72-89,109-110,113
+src/test/java/io/orkes/example/saga/workers/WorkflowDefinitionContractTest.java
+  h_a7614621effce7 77-78,345-348
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5b5d6f0d17e0bb39f8a60cbe8632157af0c330e1",
+  "prompts": {},
+  "humans": {
+    "h_a7614621effce7": {
+      "author": "tradingbot-tw <tradingbot.tw@gmail.com>"
+    }
+  }
+}
