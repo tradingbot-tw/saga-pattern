@@ -47,14 +47,6 @@
         ],
         "make_payment_ref": [
           {
-            "name": "cancel_payment",
-            "taskReferenceName": "cancel_payment_after_payment_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          },
-          {
             "name": "cancel_order",
             "taskReferenceName": "cancel_order_after_payment_ref",
             "type": "SIMPLE",
