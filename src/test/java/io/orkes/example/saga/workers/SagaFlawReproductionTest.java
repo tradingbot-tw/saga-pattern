@@ -97,29 +97,33 @@ class SagaFlawReproductionTest {
         // 4. 執行補償步驟 1: cancel_payment
         TaskResult cancelPaymentResult = workers.cancelPaymentTask(cancelRequest);
 
-        // 證實反例：cancel_payment 發現資料庫無此訂單付款，回傳不可重試的終端錯誤！
-        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, cancelPaymentResult.getStatus(),
-                "反例驗證：cancel_payment 因查無付款紀錄回傳 FAILED_WITH_TERMINAL_ERROR");
-        assertTrue(cancelPaymentResult.getReasonForIncompletion().contains("No payment found for order " + orderId));
+        // 依據 Saga 最終一致性與冪等性規範：
+        // 當付款根本未產生時，cancel_payment 應視為安全無操作（COMPLETED），不可拋出終端失敗中斷後續補償！
+        assertEquals(TaskResult.Status.COMPLETED, cancelPaymentResult.getStatus(),
+                "【Saga規範要求】查無付款時 cancel_payment 應具備冪等性回傳 COMPLETED，避免中斷補償鏈");
 
-        // 5. 由於 Conductor 遇到 FAILED_WITH_TERMINAL_ERROR 會直接將 Failure Workflow 標為失敗，
-        // 第二步 cancel_order 永遠被跳過未執行！
-        // 檢查資料庫：訂單永久懸空在 PENDING 狀態！
+        // 5. 執行補償步驟 2: cancel_order
+        TaskResult cancelOrderResult = workers.cancelOrderTask(cancelRequest);
+        assertEquals(TaskResult.Status.COMPLETED, cancelOrderResult.getStatus(),
+                "【Saga規範要求】訂單必須成功執行取消");
+
+        // 6. 檢查資料庫狀態：訂單必須最終回滾為 CANCELLED！
         String orderStatus = SagaTestDb.queryString(URL,
                 "SELECT status FROM orders WHERE orderId = '" + orderId + "'");
-        assertEquals("PENDING", orderStatus,
-                "反例證實：Saga 一致性破壞，訂單未被 cancel_order 回滾，仍為 PENDING");
+        assertEquals("CANCELLED", orderStatus,
+                "【Saga規範要求】訂單必須成功回滾為 CANCELLED，不應殘留為 PENDING");
     }
 
     @Test
-    @DisplayName("形式驗證反例 2：當 cancel_order 查無訂單或重複補償時，回傳 FAILED_WITH_TERMINAL_ERROR 破壞冪等性")
+    @DisplayName("Saga 規範驗證 2：cancel_order 在重複補償或查無訂單時，應保持冪等性回傳 COMPLETED")
     void reproduceCancelOrderNonExistentFlaw() {
         String nonExistentOrderId = SagaTestDb.uniqueId("ghost-order");
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(nonExistentOrderId);
 
         TaskResult result = workers.cancelOrderTask(cancelRequest);
-        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus(),
-                "cancel_order 回傳終端失敗，證明補償操作缺乏冪等容錯性");
+        // 依據 Saga 冪等性規範，補償操作應可安全重複執行
+        assertEquals(TaskResult.Status.COMPLETED, result.getStatus(),
+                "【Saga規範要求】cancel_order 應具備冪等性，查無訂單時應回傳 COMPLETED 而非終端失敗");
     }
 }
