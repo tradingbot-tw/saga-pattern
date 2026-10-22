@@ -7,7 +7,6 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -204,7 +203,6 @@ class OrdersDAOTest {
         }
     }
 
-    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
     @Test
     @DisplayName("REQ-2 資料庫錯誤：customers 的 INSERT 失敗時 insertCustomer 拋出 DataAccessException，不得回傳 0")
     void insertCustomerThrowsDataAccessExceptionWhenInsertFails() throws Exception {
@@ -229,7 +227,6 @@ class OrdersDAOTest {
                 "寫入失敗時不得留下客戶列");
     }
 
-    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
     @Test
     @DisplayName("REQ-2 資料庫錯誤：查詢 customers 失敗時 insertCustomer 拋出 DataAccessException，不得吞掉例外回傳 0")
     void insertCustomerThrowsDataAccessExceptionWhenLookupFails() throws Exception {
@@ -250,7 +247,6 @@ class OrdersDAOTest {
         }
     }
 
-    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
     @Test
     @DisplayName("REQ-2 資料庫錯誤：INSERT 後查不回客戶 id 時拋出 DataAccessException，不得回傳 0")
     void insertCustomerThrowsWhenInsertedRowCannotBeReadBack() throws Exception {

@@ -147,6 +147,18 @@ public class OrdersDAO extends BaseDAO {
         }
     }
 
+    /**
+     * 以 email 冪等 upsert 客戶，回傳 {@code customers.id}（Issue #87）。
+     *
+     * <p>查找既有客戶沿用其 id 的行為不變；但資料庫錯誤不再被
+     * {@code System.out.println} 吞掉：三個 SQL 區塊的 {@link SQLException} 一律包成
+     * {@link DataAccessException} 往外拋（與 {@link #cancelOrder(String)} 一致）。
+     * 修復前 INSERT 失敗會讓方法回傳 {@code 0}，{@code OrderService.createOrder} 便以
+     * {@code customerId = 0} 建立指向不存在客戶的訂單列。
+     *
+     * <p>INSERT 成功後若仍查不回 id（例如列在寫入後消失），同樣拋出
+     * {@link DataAccessException}，確保 {@code 0} 永遠不會被當成有效 id 回傳。
+     */
     public int insertCustomer(Customer customer) {
         int id = 0;
 
@@ -157,7 +169,8 @@ public class OrdersDAO extends BaseDAO {
                 id = rs.getInt("id");
             }
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException(
+                    "Failed to look up customer with email " + customer.getEmail(), e);
         }
 
         if (id > 0) {
@@ -172,16 +185,27 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(3, customer.getContact());
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException(
+                    "Failed to insert customer with email " + customer.getEmail(), e);
         }
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement("SELECT id FROM customers WHERE email = ?")) {
             pstmt.setString(1, customer.getEmail());
             ResultSet rs = pstmt.executeQuery();
-            id = rs.getInt("id");
+            if (rs.next()) {
+                id = rs.getInt("id");
+            }
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException(
+                    "Failed to read back customer id for email " + customer.getEmail(), e);
         }
+
+        if (id <= 0) {
+            throw new DataAccessException(
+                    "Customer insert for email " + customer.getEmail()
+                            + " did not yield a valid id", null);
+        }
+
         return id;
     }
 }

@@ -6,7 +6,6 @@ import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -188,7 +187,6 @@ class OrderServiceTest {
                 "orders_details 亦不得殘留任何列");
     }
 
-    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
     @Test
     @DisplayName("REQ-1 客戶寫入失敗：customers 的 INSERT 失敗時 createOrder 失敗，且資料庫不得留下 customerId = 0 的訂單列")
     void createOrderFailsWhenCustomerInsertFails() throws Exception {
