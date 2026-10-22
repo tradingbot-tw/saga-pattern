@@ -19,16 +19,16 @@
 | `src/test/java/io/orkes/example/saga/dao/ShipmentDAOTest.java` | DAO 層行為測試 |
 
 `ShipmentService` 以 static 欄位持有連線字串寫死的 `ShipmentDAO`：
-`jdbc:sqlite:food_delivery.db`（`ShipmentService.java:14`）。因此 service 層測試無法注入
+`jdbc:sqlite:food_delivery.db`（`ShipmentService.java:15`）。因此 service 層測試無法注入
 資料庫，只能共用應用程式的 DB 檔並以唯一 `orderId` 隔離情境。
 
 `shipments` 由 `BaseDAO.createShipmentTable()` 建立，`address`、`driverId`、`status`、
 `createdAt` 為 `NOT NULL`（`BaseDAO.java:153-169`）；司機種子資料為 4 筆，id 1–4
 （`BaseDAO.java:200-211`）。
 
-## 2. `createShipment` 的三條路徑
+## 2. `createShipment` 的四條路徑
 
-`ShipmentService.createShipment(ShippingRequest)` 的流程（`ShipmentService.java:16-47`）：
+`ShipmentService.createShipment(ShippingRequest)` 的流程（`ShipmentService.java:17-52`）：
 
 1. 以 `orderId`、`deliveryAddress`、`deliveryInstructions` 建立 `Shipment`，並以
    `findDriver()` 取得 `driverId` 後寫入 POJO。
@@ -38,11 +38,14 @@
 4. 名稱為空白（查無司機、`driverId == 0`，或讀取時發生 SQLException）→
    呼叫 `shipmentDAO.cancelShipment(orderId)` 把狀態改為 `CANCELED`，回傳 `0`。
 5. 名稱非空白 → 呼叫 `shipmentDAO.confirmShipment(orderId)` 改為 `CONFIRMED`，
-   回傳 `driverId`。
+   成功後回傳 `driverId`。確認失敗時 `confirmShipment` 會拋出 `DataAccessException`
+   （SQLException，或 UPDATE 沒有命中任何列），例外直接往外拋，`createShipment`
+   **不會**回傳 `driverId`。
 
 | 路徑 | 條件 | 資料庫留下的結果 | 回傳值 |
 | --- | --- | --- | --- |
 | 有司機 | INSERT 成功，且該 `driverId` 在 `drivers` 有非空白 `name` | 1 筆外送單，`SCHEDULED` → `CONFIRMED` | `driverId`（實務上為 1–3） |
+| 確認失敗 | INSERT 成功、司機存在，但 `confirmShipment` 的 UPDATE 失敗（SQLException 或 0 列） | 1 筆外送單，狀態停在 `SCHEDULED` | 不適用：拋出 `DataAccessException` |
 | 找不到司機 | INSERT 成功，但 `drivers.name` 為空白（查無該 id，含 id 0） | 1 筆外送單，`SCHEDULED` → `CANCELED` | `0` |
 | 寫入失敗 | `insertShipment` 回傳 `false`（SQLException，例如 `address` 為 `NULL` 違反 `NOT NULL`） | 沒有外送單紀錄（單一 INSERT 陳述式失敗） | `0` |
 
@@ -55,7 +58,7 @@
 
 ## 3. `findDriver` 的實作特性與對測試的意義
 
-`findDriver()`（`ShipmentService.java:59-69`）每次呼叫都建立新的 `Random`，最多抽 10 次
+`findDriver()`（`ShipmentService.java:64-74`）每次呼叫都建立新的 `Random`，最多抽 10 次
 `nextInt(4)`（值域 0–3），抽到非 0 就停止並回傳；10 次都抽到 0 才回傳 `0`。
 
 - 種子司機有 4 位（id 1–4），但 `nextInt(4)` 只會產生 0–3，**id 4 永遠不會被指派**。
@@ -90,7 +93,7 @@ stateDiagram-v2
 | 轉移 | 方法 | 實作 | 回傳／錯誤 |
 | --- | --- | --- | --- |
 | （新建）→ `SCHEDULED` | `insertShipment` | `INSERT ... status='SCHEDULED'`；不讀取 POJO 的 `status` 欄位 | `false`（SQLException 時印訊息） |
-| `SCHEDULED` → `CONFIRMED` | `confirmShipment` | `UPDATE ... SET status='CONFIRMED' WHERE orderId=?` | `void`；SQLException 只印訊息 |
+| `SCHEDULED` → `CONFIRMED` | `confirmShipment` | `UPDATE ... SET status='CONFIRMED' WHERE orderId=?` | 受影響列數；SQLException 包成 `DataAccessException` |
 | `SCHEDULED`／`CONFIRMED` → `CANCELED` | `cancelShipment` | `UPDATE ... SET status='CANCELED' WHERE orderId=?` | 受影響列數；SQLException 包成 `DataAccessException` |
 | → `DELIVERED` | 無 | 只有 enum 值，repo 內沒有任何寫入者 | 不適用 |
 
@@ -102,9 +105,9 @@ stateDiagram-v2
 - **同一個 `orderId` 的所有列都會被更新**：`WHERE orderId=?` 不是只更新一列。
 - **`createShipment` 非冪等**：每次呼叫都 INSERT 新的一列。因此 `ship_food` 的
   `retryCount` 為 `0`（`conductor/taskdefs/ship_food.json:4`），避免重試產生重複外送單。
-- **`confirmShipment` 的失敗不會回報呼叫端**：SQLException 只印訊息；若 INSERT 成功、
-  司機也存在但確認失敗，`createShipment` 仍會回傳 `driverId`，該列可能停留在
-  `SCHEDULED`。
+- **`confirmShipment` 的失敗會回報呼叫端**：SQLException 包成 `DataAccessException`；
+  `createShipment` 在 UPDATE 回傳 `0` 時也視為失敗並拋出例外。兩者都不會回傳
+  `driverId`，該列會停留在 `SCHEDULED`（service 不自動取消，見 §5）。
 - **`DELIVERED` 目前不可達**：它只存在於 enum；`docs/architecture.md` 的資料模型也將它
   列為未被使用的狀態值。
 
@@ -124,25 +127,33 @@ stateDiagram-v2
   `FAILED_WITH_TERMINAL_ERROR`（"No shipment found for order ..."），反而讓補償流程失敗。
 - **找不到司機**：外送單已由 service 自行改成 `CANCELED`。再呼叫 `cancel_delivery`
   雖然會因為 UPDATE 不檢查狀態而回傳 1、回報 `COMPLETED`，但沒有任何額外效果，只是重複。
+- **確認失敗**：INSERT 與司機查詢都成功，但 `confirmShipment` 的 UPDATE 失敗。
+  外送單已寫入且停在 `SCHEDULED`；service 拋出 `DataAccessException`，worker 回報
+  可重試的 `FAILED`。這個情況不在下面「不存在或 `CANCELED`」的保證內。
 
-因此，在 `ship_food` 對每個 `orderId` 只執行一次的前提下，失敗後的保證是：
+因此，在 `ship_food` 對每個 `orderId` 只執行一次的前提下，**既有兩種失敗**的保證是：
 **外送單要嘛不存在，要嘛已經 `CANCELED`**。補償流程可以安全跳過 `cancel_delivery`，
-直接取消付款與訂單。這條保證由 `createShipment` 的
-「先寫入、再自行取消」維持；若日後修改 `createShipment`（例如不再自我取消，或讓失敗時
-留下 `SCHEDULED`），`FoodDeliveryFailureWorkflow` 的 `ship_food_ref` 分支就必須加回
-`cancel_delivery`。
+直接取消付款與訂單。這條保證由 `createShipment` 的「先寫入、再自行取消」維持。
+
+Issue #84 的**確認失敗**則是第三種情況，不在這條保證內：出貨單停在 `SCHEDULED`，
+而 `FoodDeliveryFailureWorkflow` 的 `ship_food_ref` 分支目前仍只呼叫 `cancel_payment`
+→ `cancel_order`，不會取消它；`ship_food` 的 `retryCount` 又是 0，所以補償完成後
+這筆 `SCHEDULED` 出貨單會留在資料庫。這是已知缺口，需由後續工作項決定要讓補償流程
+加回 `cancel_delivery`，或讓 service 在確認失敗時自行取消。
 
 `cancel_delivery` 仍用於 `notify_driver_ref`／`notify_customer_ref` 失敗的分支
 （`FoodDeliveryFailureWorkflow.v1.json:84-135`）：那時 `ship_food` 已成功，外送單確實
 存在（通常為 `CONFIRMED`），才需要補償取消。
 
-`ship_food` worker 的接縫（`ConductorWorkers.java:91-104`）：`createShipment` 回傳非 0
-→ `COMPLETED` 且 output 帶 `driverId`；回傳 0 → `FAILED`，不輸出 `driverId`。由於
-`ship_food` 的 `retryCount` 為 0，Conductor 不會重試，workflow 直接進入失敗補償。
+`ship_food` worker 的接縫（`ConductorWorkers.java:95-114`）：`createShipment` 回傳非 0
+→ `COMPLETED` 且 output 帶 `driverId`；回傳 0 → `FAILED`，不輸出 `driverId`；
+`createShipment` 拋出 `DataAccessException`（確認失敗）→ 同樣回 `FAILED`，並把例外
+訊息放進 `reasonForIncompletion`，output 不含 `driverId`。由於 `ship_food` 的
+`retryCount` 為 0，Conductor 不會重試，workflow 直接進入失敗補償。
 
 ## 6. 現有測試各保護哪一行為
 
-### `ShipmentServiceTest`（service 層，5 個測試）
+### `ShipmentServiceTest`（service 層，7 個測試）
 
 | 測試 | 保護的行為 |
 | --- | --- |
@@ -151,6 +162,8 @@ stateDiagram-v2
 | `createShipmentReturnsZeroWithoutPersistingWhenInsertFails` | 缺少 `deliveryAddress` 導致 INSERT 失敗時回傳 `0`、沒有留下任何外送單、狀態查詢為 `null` |
 | `cancelDeliveryCancelsExistingShipment` | `cancelDelivery` 對既有外送單回傳 1，狀態變為 `CANCELED` |
 | `cancelDeliveryOnUnknownOrderReturnsZero` | 查無外送單時回傳 `0`，不拋錯也不留下紀錄（worker 據此回報 terminal error） |
+| `createShipmentPropagatesWhenConfirmFails` | `confirmShipment` 的 UPDATE 拋出 SQLException 時 `createShipment` 拋出 `DataAccessException`，且狀態不是 `CONFIRMED` |
+| `createShipmentPropagatesWhenConfirmUpdatesNoRows` | `confirmShipment` 更新 0 列時同樣拋出 `DataAccessException`，不得回傳 `driverId` |
 
 輔助方法 `withoutAvailableDrivers` 先備份再刪除 id 1–3 的司機列，於 `finally` 還原；
 它不動 `findDriver()` 的實作，讓「找不到司機」成為確定性的資料庫情境（見 §3）。
@@ -169,8 +182,12 @@ stateDiagram-v2
 | `shipmentStatusEnumIsClosed` | 狀態列舉只有 `SCHEDULED`／`CONFIRMED`／`DELIVERED`／`CANCELED` 四種，且 `valueOf` 可還原 |
 
 兩層測試互補：`ShipmentDAOTest` 固定 DAO 的 primitive（INSERT 起始狀態、UPDATE 的狀態
-轉移與受影響列數、失敗訊號）；`ShipmentServiceTest` 固定 orchestration（三條路徑的回傳值、
+轉移與受影響列數、失敗訊號）；`ShipmentServiceTest` 固定 orchestration（四條路徑的回傳值、
 寫入順序，以及 `ship_food` 補償前提所依賴的自我取消）。
+
+`ConductorWorkersTest` 另以 SQLite TRIGGER 讓 `confirmShipment` 失敗，斷言
+`shipFoodFailsRetryablyWhenConfirmFails` 回傳 `FAILED`、`reasonForIncompletion` 保留
+資料庫訊息，且 output 不含 `driverId`。
 
 ## 7. 已知限制與變更時注意
 
@@ -178,6 +195,6 @@ stateDiagram-v2
    `food_delivery.db`（`.gitignore` 已排除），以唯一 `orderId` 隔離。
 2. 狀態 UPDATE 沒有前置條件，且以 `orderId` 批次更新；同一 `orderId` 有多列時會全部被改。
 3. `createShipment` 非冪等，每次呼叫都新增一列；`ship_food` 因此不重試。
-4. `confirmShipment` 的 SQLException 只印訊息，不影響 `createShipment` 的回傳值。
+4. `confirmShipment` 失敗（SQLException 或 0 列）會讓 `createShipment` 拋出 `DataAccessException`，出貨單停在 `SCHEDULED`，service 不自動取消（見 §5 的已知缺口）。
 5. `findDriver` 的值域是 0–3，種子司機 id 4 永遠不會被指派。
 6. `DELIVERED` 只有 enum 定義，沒有生產者；若要啟用，需同時補上寫入端與測試。
