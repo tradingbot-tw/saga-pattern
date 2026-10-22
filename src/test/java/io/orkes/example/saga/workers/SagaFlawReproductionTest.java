@@ -1,5 +1,7 @@
 package io.orkes.example.saga.workers;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.pojos.*;
@@ -8,18 +10,22 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 形式驗證反例重現測試：
- * 重現 Quint 形式規格所發現的 Saga 補償缺陷（FoodDeliveryFailureWorkflow 遇 make_payment 失敗時）。
+ * 驗證針對 Quint 形式規格反例所做的修正：
+ * 1. 工作流層級：FoodDeliveryFailureWorkflow.v1.json 在 make_payment_ref 失敗時不再無效呼叫 cancel_payment。
+ * 2. 業務層級：make_payment 失敗時正確依序回滾 cancel_order，確保訂單狀態成功轉為 CANCELLED，達成最終一致性。
+ * 3. 安全防護：查無訂單時仍具備終端錯誤防護，防止無效 ID 誤報成功。
  */
 class SagaFlawReproductionTest {
 
     private static final String URL = SagaTestDb.APP_DB_URL;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private ConductorWorkers workers;
 
     @BeforeAll
@@ -42,7 +48,7 @@ class SagaFlawReproductionTest {
     private static OrderRequest orderRequest() {
         OrderRequest request = new OrderRequest();
         request.setCustomerEmail(SagaTestDb.uniqueId("buyer") + "@example.com");
-        request.setCustomerName("反例驗證買家");
+        request.setCustomerName("反例修正驗證買家");
         request.setCustomerContact("+886912345678");
         request.setRestaurantId(1);
         request.setItems(new ArrayList<>(Arrays.asList(item("burger", 1))));
@@ -51,27 +57,28 @@ class SagaFlawReproductionTest {
         return request;
     }
 
-    private static PaymentRequest expiredPaymentRequest(String orderId) {
-        PaymentDetails details = new PaymentDetails();
-        details.setNumber("4111111111111111");
-        details.setExpiry("01/2020"); // 已過期卡片，確保 makePayment 失敗
-        details.setCvv(123);
+    @Test
+    @DisplayName("工作流修復驗證：FoodDeliveryFailureWorkflow 在 make_payment_ref 分支不再包含 cancel_payment")
+    void verifyWorkflowDefinitionNoLongerInvokesCancelPaymentOnPaymentFailure() throws Exception {
+        File workflowFile = new File("conductor/workflows/FoodDeliveryFailureWorkflow.v1.json");
+        assertTrue(workflowFile.exists(), "FoodDeliveryFailureWorkflow.v1.json 必須存在");
 
-        PaymentMethod method = new PaymentMethod();
-        method.setType("Credit Card");
-        method.setDetails(details);
+        JsonNode root = MAPPER.readTree(workflowFile);
+        JsonNode switchTask = root.path("tasks").get(1); // switch_compensate_from
+        assertEquals("switch_compensate_from", switchTask.path("name").asText());
 
-        PaymentRequest request = new PaymentRequest();
-        request.setOrderId(orderId);
-        request.setCustomerId(1);
-        request.setAmount(100f);
-        request.setMethod(method);
-        return request;
+        JsonNode paymentBranch = switchTask.path("decisionCases").path("make_payment_ref");
+        assertNotNull(paymentBranch, "make_payment_ref 分支必須存在");
+
+        // 驗證 make_payment_ref 下只有 cancel_order，無 cancel_payment
+        assertEquals(1, paymentBranch.size(), "make_payment_ref 分支應僅有 1 個補償步驟（cancel_order）");
+        assertEquals("cancel_order", paymentBranch.get(0).path("name").asText(),
+                "make_payment_ref 失敗時應僅補償 cancel_order，不應調用未產生的 cancel_payment");
     }
 
     @Test
-    @DisplayName("形式驗證反例 1：當 make_payment 未成功寫入付款紀錄即失敗時，Failure Workflow 觸發 cancel_payment 會因查無付款回傳 FAILED_WITH_TERMINAL_ERROR，中斷補償鏈導致訂單殘留未取消")
-    void reproducePaymentAbsentCompensationFailureFlaw() throws Exception {
+    @DisplayName("Saga 一致性驗證：make_payment 失敗後，依修正後工作流執行 cancel_order 成功將訂單回滾為 CANCELLED")
+    void testPaymentFailureSagaCompensationRollsBackOrderSuccessfully() throws Exception {
         // 1. 正向步驟 1: order_food 建立訂單成功
         TaskResult orderResult = workers.orderFoodTask(orderRequest());
         assertEquals(TaskResult.Status.COMPLETED, orderResult.getStatus());
@@ -85,45 +92,32 @@ class SagaFlawReproductionTest {
         TaskResult inventoryResult = workers.checkInventoryTask(inventoryRequest);
         assertEquals(TaskResult.Status.COMPLETED, inventoryResult.getStatus());
 
-        // 3. 步驟 3: make_payment 任務在尚未建立付款前即失敗
-        // （例如 Conductor 端任務逾時、參數解析異常、或資料庫在 insertPayment 時失敗未留下紀錄）
-        // 按照 FoodDeliveryFailureWorkflow.v1.json 之設計，失敗任務為 make_payment_ref 時，
-        // Conductor switch-case 會強制依序排程：
-        //   [1] cancel_payment
-        //   [2] cancel_order
+        // 3. 步驟 3: make_payment 任務失敗（未落庫成功）
+        // 依據修復後的 FoodDeliveryFailureWorkflow.v1.json 定義：
+        // make_payment_ref 失敗分支不再呼叫 cancel_payment，直接執行 cancel_order
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(orderId);
 
-        // 4. 執行補償步驟 1: cancel_payment
-        TaskResult cancelPaymentResult = workers.cancelPaymentTask(cancelRequest);
-
-        // 依據 Saga 最終一致性與冪等性規範：
-        // 當付款根本未產生時，cancel_payment 應視為安全無操作（COMPLETED），不可拋出終端失敗中斷後續補償！
-        assertEquals(TaskResult.Status.COMPLETED, cancelPaymentResult.getStatus(),
-                "【Saga規範要求】查無付款時 cancel_payment 應具備冪等性回傳 COMPLETED，避免中斷補償鏈");
-
-        // 5. 執行補償步驟 2: cancel_order
         TaskResult cancelOrderResult = workers.cancelOrderTask(cancelRequest);
         assertEquals(TaskResult.Status.COMPLETED, cancelOrderResult.getStatus(),
-                "【Saga規範要求】訂單必須成功執行取消");
+                "cancel_order 應順利成功執行並回報 COMPLETED");
 
-        // 6. 檢查資料庫狀態：訂單必須最終回滾為 CANCELLED！
+        // 4. 驗證最終一致性：訂單狀態必須成功回滾為 CANCELLED，消弭懸空副作用！
         String orderStatus = SagaTestDb.queryString(URL,
                 "SELECT status FROM orders WHERE orderId = '" + orderId + "'");
         assertEquals("CANCELLED", orderStatus,
-                "【Saga規範要求】訂單必須成功回滾為 CANCELLED，不應殘留為 PENDING");
+                "訂單必須成功回滾為 CANCELLED，達成 Saga 最終一致性");
     }
 
     @Test
-    @DisplayName("Saga 規範驗證 2：cancel_order 在重複補償或查無訂單時，應保持冪等性回傳 COMPLETED")
-    void reproduceCancelOrderNonExistentFlaw() {
+    @DisplayName("安全防護驗證：cancel_order 遇惡意或幽靈 orderId 依然回傳 FAILED_WITH_TERMINAL_ERROR 擋下非法請求")
+    void verifyGhostOrderReturnsTerminalError() {
         String nonExistentOrderId = SagaTestDb.uniqueId("ghost-order");
         CancelRequest cancelRequest = new CancelRequest();
         cancelRequest.setOrderId(nonExistentOrderId);
 
         TaskResult result = workers.cancelOrderTask(cancelRequest);
-        // 依據 Saga 冪等性規範，補償操作應可安全重複執行
-        assertEquals(TaskResult.Status.COMPLETED, result.getStatus(),
-                "【Saga規範要求】cancel_order 應具備冪等性，查無訂單時應回傳 COMPLETED 而非終端失敗");
+        assertEquals(TaskResult.Status.FAILED_WITH_TERMINAL_ERROR, result.getStatus(),
+                "查無訂單時應依 Issue #34 規範回傳終端錯誤，避免無效 ID 誤報成功");
     }
 }
