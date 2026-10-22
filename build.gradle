@@ -6,6 +6,7 @@ buildscript {
 
 plugins {
     id 'java'
+    id 'jacoco'
     id 'org.springframework.boot' version '3.2.3'
     id 'io.freefair.lombok' version '8.6'
 }
@@ -31,4 +32,37 @@ dependencies {
 
 test {
     useJUnitPlatform()
+    // 測試後自動產出 JaCoCo 報告（Issue #88：就緒度 R2 需要行覆蓋率數據）
+    finalizedBy jacocoTestReport
+}
+
+jacoco {
+    toolVersion = '0.8.12'
+}
+
+// 覆蓋率門檻（Issue #88）：整體行覆蓋率不得低於 60%（就緒度 R2 的下限）。
+// 依模組的門檻無法用 JaCoCo 原生 rule 表達（它按 package/class 分組），
+// 逐模組數字由 docs/quality/test-coverage.md 的腳本產出並由人審核。
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                minimum = 0.60
+            }
+        }
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification
+
+jacocoTestReport {
+    dependsOn test
+    // 產出 HTML（人看）與 XML（機器讀：每模組行覆蓋率）
+    reports {
+        html.required = true
+        xml.required = true
+        csv.required = false
+    }
 }
