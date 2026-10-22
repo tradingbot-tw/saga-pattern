@@ -11,8 +11,10 @@
 module sagaTypes {
   // 補償 workflow（FoodDeliveryFailureWorkflow）的版本
   type CompWorkflow =
-    | PreFixWorkflow    // ab60ba5 之前：make_payment_ref 分支為 cancel_payment → cancel_order
-    | CurrentWorkflow   // 現行 conductor/workflows/FoodDeliveryFailureWorkflow.v1.json
+    | PreFixWorkflow    // ab60ba5 之前：SWITCH 版，make_payment_ref 分支為 cancel_payment → cancel_order
+    | SwitchWorkflow    // ab60ba5 之後、#136–#139 修正之前：SWITCH on failedReferenceTaskNames[0]
+    | CurrentWorkflow   // 現行 conductor/workflows/FoodDeliveryFailureWorkflow.v1.json：
+                        // orderId = workflowId；一律反向執行冪等的 cancel_*（allowMissing = true）
 
   // 資料庫實體狀態（對應 orders / payments / shipments 的 status 欄位；None = 沒有這一列）
   type OrderStatus    = OrderNone | OrderCreated | OrderCancelled
@@ -70,6 +72,7 @@ module sagaTypes {
     | ActJoin
     | ActSelect(TaskRef)                   // SWITCH 取 failedReferenceTaskNames[0]
     | ActSelectDefault                     // 集合為空 → defaultCase
+    | ActFullCompensation                  // 現行：不看失敗點，一律反向補償
     | ActCompOk(CompTask)
     | ActCompTerminalError(CompTask)
     | ActCompEnvFault(CompTask)
@@ -175,7 +178,17 @@ module saga {
   // 純函數：補償 workflow
   // -------------------------------------------------------------------------
 
-  // FoodDeliveryFailureWorkflow 的 SWITCH(decisionCases) 表；未列出者走 defaultCase: []
+  // 補償 workflow 是否以 SWITCH on failedReferenceTaskNames[0] 決定補償內容
+  pure def usesSwitch(wf: CompWorkflow): bool = wf != CurrentWorkflow
+
+  // cancel_* 是否以 allowMissing = true 呼叫（查無資料視為已取消，回 COMPLETED）
+  pure def allowMissing(wf: CompWorkflow): bool = wf == CurrentWorkflow
+
+  // 現行補償 workflow：orderId 取自 failedWorkflow.workflowId（order_food 以它建立訂單），
+  // 因此永遠已知；一律依正向步驟的反序取消
+  pure val FULL_COMPENSATION: List[CompTask] = List(CancelDelivery, CancelPayment, CancelOrder)
+
+  // SWITCH 版的 decisionCases 表；未列出者走 defaultCase: []
   pure def compensationPlan(wf: CompWorkflow, key: TaskRef): List[CompTask] =
     match key {
       | CheckInventoryRef => List(CancelOrder)
@@ -199,12 +212,16 @@ module saga {
       | NotifyFailure  => true
     }
 
-  // 補償 task 成功時對資料庫的效果（UPDATE 不看原狀態，一律改為 CANCELED）
+  // 補償 task 回 FAILED_WITH_TERMINAL_ERROR：影響 0 列，且未允許查無資料
+  pure def compTerminalError(wf: CompWorkflow, d: Db, t: CompTask): bool =
+    not(allowMissing(wf)) and not(hasTargetRow(d, t))
+
+  // 補償 task 成功時對資料庫的效果：UPDATE 不看原狀態，有列就改為 CANCELED；沒有列則不變
   pure def applyComp(d: Db, t: CompTask): Db =
     match t {
-      | CancelDelivery => { ...d, shipment: ShipmentCanceled }
-      | CancelPayment  => { ...d, payment: PaymentCanceled }
-      | CancelOrder    => { ...d, order: OrderCancelled }
+      | CancelDelivery => { ...d, shipment: if (d.shipment == ShipmentNone) ShipmentNone else ShipmentCanceled }
+      | CancelPayment  => { ...d, payment: if (d.payment == PaymentNone) PaymentNone else PaymentCanceled }
+      | CancelOrder    => { ...d, order: if (d.order == OrderNone) OrderNone else OrderCancelled }
       | NotifyFailure  => d
     }
 
@@ -339,6 +356,7 @@ module saga {
   // SWITCH 取 failedReferenceTaskNames[0]。集合是 HashSet，[0] 取決於雜湊順序而非執行順序，
   // 因此以「集合中任一元素」過度近似。
   action selectCompensation(key: TaskRef): bool = all {
+    usesSwitch(COMP_WORKFLOW),
     saga.phase == MainFailed,
     saga.failedRefs.contains(key),
     db' = db,
@@ -348,6 +366,7 @@ module saga {
 
   // 集合為空（例如逾時）→ JSON 中沒有該 key → [0] 為 null → defaultCase: []
   action selectDefaultCompensation: bool = all {
+    usesSwitch(COMP_WORKFLOW),
     saga.phase == MainFailed,
     saga.failedRefs == Set(),
     db' = db,
@@ -355,18 +374,27 @@ module saga {
     lastAction' = ActSelectDefault,
   }
 
+  // 現行：不看 failedReferenceTaskNames，一律 cancel_delivery → cancel_payment → cancel_order
+  action startFullCompensation: bool = all {
+    not(usesSwitch(COMP_WORKFLOW)),
+    saga.phase == MainFailed,
+    db' = db,
+    saga' = startCompensation(saga, FULL_COMPENSATION),
+    lastAction' = ActFullCompensation,
+  }
+
   action compensateOk: bool = all {
     hasPendingComp(saga),
-    hasTargetRow(db, saga.compQueue.head()),
+    not(compTerminalError(COMP_WORKFLOW, db, saga.compQueue.head())),
     db' = applyComp(db, saga.compQueue.head()),
     saga' = popComp(saga),
     lastAction' = ActCompOk(saga.compQueue.head()),
   }
 
-  // 查無目標列 → FAILED_WITH_TERMINAL_ERROR → 補償 workflow FAILED
+  // 查無目標列且未允許 → FAILED_WITH_TERMINAL_ERROR → 補償 workflow FAILED
   action compensateTerminalError: bool = all {
     hasPendingComp(saga),
-    not(hasTargetRow(db, saga.compQueue.head())),
+    compTerminalError(COMP_WORKFLOW, db, saga.compQueue.head()),
     db' = db,
     saga' = failComp(saga, false),
     lastAction' = ActCompTerminalError(saga.compQueue.head()),
@@ -399,6 +427,7 @@ module saga {
         joinComplete,
         selectCompensation(key),
         selectDefaultCompensation,
+        startFullCompensation,
         compensateOk,
       },
       // 業務失敗（worker 依程式邏輯回報失敗）
@@ -482,6 +511,7 @@ module saga {
   val w_join: bool                   = lastAction == ActJoin
   val w_select: bool                 = isSelect(lastAction)
   val w_select_default: bool         = lastAction == ActSelectDefault
+  val w_full_compensation: bool      = lastAction == ActFullCompensation
   val w_cancel_delivery_ok: bool     = lastAction == ActCompOk(CancelDelivery)
   val w_cancel_payment_ok: bool      = lastAction == ActCompOk(CancelPayment)
   val w_cancel_order_ok: bool        = lastAction == ActCompOk(CancelOrder)
@@ -499,6 +529,11 @@ module saga {
 module saga_prefix {
   import sagaTypes.*
   import saga(COMP_WORKFLOW = PreFixWorkflow).*
+}
+
+module saga_switch {
+  import sagaTypes.*
+  import saga(COMP_WORKFLOW = SwitchWorkflow).*
 }
 
 module saga_current {
