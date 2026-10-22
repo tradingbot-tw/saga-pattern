@@ -167,17 +167,18 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
 例外，都不會執行到 `insertOrder`，資料庫裡沒有可取消的訂單（Issue #87）。
 
 workflow 掛有 `failureWorkflow: FoodDeliveryFailureWorkflow`
-（`conductor/workflows/FoodDeliveryWorkflow.v1.json`）。該補償 workflow 的
-`switch_compensate_from` **沒有 `order_food_ref` 分支**、`defaultCase` 為空
-（`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json`），所以 `order_food` 失敗時
-不會執行 `cancel_order`；最後的 `notify_customer` 仍會執行。
+（`conductor/workflows/FoodDeliveryWorkflow.v2.json`）。補償 workflow **不看失敗點**，
+一律依反向順序執行 `cancel_delivery` → `cancel_payment` → `cancel_order`，每個都帶
+`allowMissing=true`（`conductor/workflows/FoodDeliveryFailureWorkflow.v2.json`）。
+`order_food` 失敗時資料庫通常沒有訂單，`cancel_order` 影響 0 列，因 `allowMissing` 視為
+no-op 而回 `COMPLETED`；最後的 `notify_customer` 仍會執行。
 
-這個設計假設「`order_food` 失敗＝沒有建立訂單」。Issue #86 之前該假設並不成立（`orders`
-已寫入、`orders_details` 失敗時，資料庫會有一筆補償涵蓋不到的 `PENDING` 訂單）；如今
-`createOrder` 的兩個 `INSERT` 由同一個交易包覆，失敗時不留下任何訂單列，假設已由實作保證——
-不需要、也不應該在補償 workflow 加 `order_food_ref` 分支：失敗時 `order_food` 輸出的
-`orderId` 是 `null`，或在客戶 upsert 失敗時直接拋出例外，兩種情況資料庫裡本就沒有
-可取消的訂單。
+這個「一律取消」的設計不假設「`order_food` 失敗＝沒有建立訂單」，因此也涵蓋
+`order_food` 已寫入訂單但回報逾時的情況：主 workflow 把 `orderId` 設為
+`${workflow.workflowId}`，補償 workflow 的 JQ 也以 `workflowId` 為最後退路
+（#137）。這取代了舊版「依 `failedReferenceTaskNames[0]` 選分支、`order_food_ref` 走
+`defaultCase` 而不補償」的做法——那個做法在 `order_food` 逾時且訂單已建立時會留下
+`PENDING` 訂單（見 `specs/README.md` 的缺陷 B）。
 
 ## cancelOrder：補償語意
 
@@ -222,7 +223,7 @@ UPDATE orders SET status = 'CANCELLED' WHERE orderId = ?
 ### 在補償流程中的位置
 
 `FoodDeliveryFailureWorkflow` 依失敗的 task 決定補償起點，`cancel_order` 一律排在最後
-（`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json`）：
+（`conductor/workflows/FoodDeliveryFailureWorkflow.v2.json`）：
 
 | 失敗的 task | 依序執行的補償 |
 | --- | --- |
@@ -315,5 +316,5 @@ stateDiagram-v2
 
 - 端點與啟動：`controller/OrderServiceController.java`、`service/WorkflowService.java`
 - 訂單邏輯：`service/OrderService.java`、`dao/OrdersDAO.java`、`pojos/Order.java`、`pojos/OrderRequest.java`、`pojos/FoodDeliveryRequest.java`
-- Conductor 定義：`conductor/workflows/FoodDeliveryWorkflow.v1.json`、`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json`、`conductor/taskdefs/order_food.json`、`conductor/taskdefs/cancel_order.json`
+- Conductor 定義：`conductor/workflows/FoodDeliveryWorkflow.v2.json`、`conductor/workflows/FoodDeliveryFailureWorkflow.v2.json`、`conductor/taskdefs/order_food.json`、`conductor/taskdefs/cancel_order.json`
 - 系統全貌與風險：`docs/architecture.md`

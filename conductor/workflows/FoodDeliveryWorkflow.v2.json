@@ -1,7 +1,7 @@
 {
   "name": "FoodDeliveryWorkflow",
   "description": "Saga: order → inventory → payment → shipment → notify (fork/join). Rebuilt from code + public description; see conductor/PROVENANCE.md.",
-  "version": 1,
+  "version": 2,
   "schemaVersion": 2,
   "restartable": true,
   "workflowStatusListenerEnabled": false,

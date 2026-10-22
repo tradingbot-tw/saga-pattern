@@ -7,6 +7,7 @@ import com.netflix.conductor.common.metadata.tasks.TaskResult;
 import com.netflix.conductor.common.metadata.workflow.StartWorkflowRequest;
 import com.netflix.conductor.common.run.Workflow;
 import io.orkes.conductor.client.ApiClient;
+import io.orkes.conductor.client.http.ApiException;
 import io.orkes.conductor.client.http.OrkesTaskClient;
 import io.orkes.conductor.client.http.OrkesWorkflowClient;
 import io.orkes.example.saga.SagaTestDb;
@@ -151,7 +152,9 @@ class OrkesCloudE2EVerificationTest {
         assertEquals(TaskResult.Status.COMPLETED,
                 workers.makePaymentTask(bind(paymentTask, PaymentRequest.class)).getStatus());
 
-        awaitMainTerminated(workflowId, Workflow.WorkflowStatus.TIMED_OUT, 240);
+        // make_payment 的 timeoutSeconds 是 300：task 逾時要等滿 300 秒才觸發 TIME_OUT_WF，
+        // 所以等待時間必須大於它（實測首個版本約 304 秒轉為 TIMED_OUT）。
+        awaitMainTerminated(workflowId, Workflow.WorkflowStatus.TIMED_OUT, 420);
         runCompensation(workflowId);
         assertNothingLeft(workflowId);
     }
@@ -182,7 +185,7 @@ class OrkesCloudE2EVerificationTest {
     private String startWorkflow(Map<String, Object> paymentMethod) {
         StartWorkflowRequest startReq = new StartWorkflowRequest();
         startReq.setName("FoodDeliveryWorkflow");
-        startReq.setVersion(1);
+        startReq.setVersion(2);
         startReq.setCorrelationId("e2e-test-" + domain);
         startReq.setTaskToDomain(Map.of("*", domain));
 
@@ -258,16 +261,26 @@ class OrkesCloudE2EVerificationTest {
         assertEquals(Workflow.WorkflowStatus.COMPLETED, compensation.getStatus(), "補償 workflow 應完成");
     }
 
+    /**
+     * 等待主 workflow 進入終態。長時間輪詢時 Orkes client 偶爾會回 HTTP timeout／5xx，
+     * 這不是產品行為，重試即可；只有狀態不符才讓測試失敗。
+     */
     private Workflow awaitMainTerminated(String workflowId, Workflow.WorkflowStatus expected, int maxSeconds)
             throws Exception {
         Workflow main = null;
-        for (int i = 0; i < maxSeconds; i++) {
-            main = workflowClient.getWorkflow(workflowId, true);
-            if (main.getStatus().isTerminal()) {
-                break;
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                main = workflowClient.getWorkflow(workflowId, true);
+                if (main.getStatus().isTerminal()) {
+                    break;
+                }
+            } catch (ApiException e) {
+                System.out.println(">>> [E2E] 輪詢暫時失敗，重試：" + e.getMessage());
             }
-            Thread.sleep(1000);
+            Thread.sleep(3000);
         }
+        assertNotNull(main, "未能取得主流程狀態");
         assertEquals(expected, main.getStatus(), "主流程狀態");
         return main;
     }
@@ -312,12 +325,17 @@ class OrkesCloudE2EVerificationTest {
     }
 
     private Task pollWithRetry(String taskType, int maxSeconds) throws Exception {
-        for (int i = 0; i < maxSeconds; i++) {
-            Task task = taskClient.pollTask(taskType, "e2e-worker", domain);
-            if (task != null && task.getTaskId() != null) {
-                return task;
+        long deadline = System.currentTimeMillis() + maxSeconds * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Task task = taskClient.pollTask(taskType, "e2e-worker", domain);
+                if (task != null && task.getTaskId() != null) {
+                    return task;
+                }
+            } catch (ApiException e) {
+                System.out.println(">>> [E2E] 領取 " + taskType + " 暫時失敗，重試：" + e.getMessage());
             }
-            Thread.sleep(1000);
+            Thread.sleep(2000);
         }
         return null;
     }

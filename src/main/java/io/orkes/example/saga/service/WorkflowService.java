@@ -22,7 +22,9 @@ public class WorkflowService {
     public Map<String, Object> startFoodDeliveryWorkflow(FoodDeliveryRequest foodDeliveryRequest) {
         StartWorkflowRequest request = new StartWorkflowRequest();
         request.setName("FoodDeliveryWorkflow");
-        request.setVersion(1);
+        // version 2（#136–#139）：補償 workflow 改為不看失敗點、一律反向冪等取消；
+        // order_food 以 ${workflow.workflowId} 當 orderId。舊的 version 1 不會被啟動。
+        request.setVersion(2);
         request.setCorrelationId("api-triggered");
 
         String TASK_DOMAIN_PROPERTY = "conductor.worker.all.domain";

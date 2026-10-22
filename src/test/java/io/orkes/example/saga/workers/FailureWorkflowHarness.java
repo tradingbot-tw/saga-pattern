@@ -27,7 +27,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * 在測試中執行 {@code conductor/workflows/FoodDeliveryFailureWorkflow.v1.json}，不連線 Conductor server。
+ * 在測試中執行 {@code conductor/workflows/FoodDeliveryFailureWorkflow.v2.json}，不連線 Conductor server。
  *
  * <p>對應 specs/saga.qnt 的補償模型，每一步都盡量使用與正式環境相同的元件：
  * <ol>
@@ -56,7 +56,7 @@ final class FailureWorkflowHarness {
     }
 
     static FailureWorkflowHarness load(ConductorWorkers workers) throws IOException {
-        Path file = Paths.get("conductor/workflows/FoodDeliveryFailureWorkflow.v1.json");
+        Path file = Paths.get("conductor/workflows/FoodDeliveryFailureWorkflow.v2.json");
         JsonNode root = new ObjectMapper().readTree(Files.readString(file, StandardCharsets.UTF_8));
         return new FailureWorkflowHarness(root, workers);
     }
@@ -95,7 +95,7 @@ final class FailureWorkflowHarness {
     static JsonNode failedWorkflow(String workflowId, Workflow.WorkflowStatus status, List<Task> tasks) {
         WorkflowDef def = new WorkflowDef();
         def.setName("FoodDeliveryWorkflow");
-        def.setVersion(1);
+        def.setVersion(2);
 
         Workflow workflow = new Workflow();
         workflow.setWorkflowId(workflowId);

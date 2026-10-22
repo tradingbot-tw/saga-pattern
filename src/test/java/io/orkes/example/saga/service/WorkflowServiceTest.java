@@ -83,7 +83,7 @@ class WorkflowServiceTest {
     }
 
     @Test
-    @DisplayName("happy path：啟動 FoodDeliveryWorkflow v1 並把訂單資訊完整帶進工作流輸入")
+    @DisplayName("happy path：啟動 FoodDeliveryWorkflow v2 並把訂單資訊完整帶進工作流輸入")
     void startsWorkflowWithFullInput() {
         Map<String, Object> result = new WorkflowService(client, environmentWithDomain("saga"))
                 .startFoodDeliveryWorkflow(deliveryRequest());
@@ -93,7 +93,7 @@ class WorkflowServiceTest {
 
         StartWorkflowRequest sent = client.captured;
         assertEquals("FoodDeliveryWorkflow", sent.getName());
-        assertEquals(Integer.valueOf(1), sent.getVersion());
+        assertEquals(Integer.valueOf(2), sent.getVersion(), "version 2 起補償改為反向冪等取消（#136–#139）");
         assertEquals("api-triggered", sent.getCorrelationId());
 
         Map<String, Object> input = sent.getInput();
