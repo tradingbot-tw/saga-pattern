@@ -115,7 +115,7 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
 
 | 步驟 | 實作 | 資料庫效果 |
 | --- | --- | --- |
-| 1. 建立客戶 | `OrdersDAO.insertCustomer`（`dao/OrdersDAO.java:150-186`） | 先以 `email` 查 `customers`：已存在就沿用該 `id`（**不更新** name／contact）；不存在則 `INSERT` 後再查回 `id` |
+| 1. 建立客戶 | `OrdersDAO.insertCustomer`（`dao/OrdersDAO.java:150-203`） | 先以 `email` 查 `customers`：已存在就沿用該 `id`（**不更新** name／contact）；不存在則 `INSERT` 後再查回 `id`。任何資料庫錯誤（查找、`INSERT`、回讀，或回讀查無列）拋出 `DataAccessException`，不再回傳 `0` 當成有效 id（Issue #87） |
 | 2. 建立訂單 | `OrderService.createOrder`（`service/OrderService.java:22-39`） | 產生隨機 UUID 作為 `orderId`；狀態固定 `PENDING`；帶入 `restaurantId`、`deliveryAddress` |
 | 3. 寫入訂單與明細 | `OrdersDAO.insertOrder`（`dao/OrdersDAO.java:18-79`） | 同一連線、同一交易（Issue #86）依序 `INSERT INTO orders`、`INSERT INTO orders_details`（`items`／`notes`），兩步全成才 `commit`。`items` 與 `notes` 以 Java 集合的 `toString()` 字串落地，不是結構化 JSON |
 | 4. 回傳結果 | `OrderService.createOrder`（`service/OrderService.java:48-58`） | `insertOrder` 回傳空字串代表成功，回傳 UUID；回傳非空錯誤訊息時記 log 並回傳 `null` |
@@ -131,6 +131,19 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
   交易保證取代了原先缺陷描述的修法方向（Issue #86 修復前，`createOrder` 回傳 `null` 讓
   `order_food` 轉 `FAILED`，而補償流程對 `order_food` 失敗不做任何事（見下一節），
   已寫入的 `PENDING` 列會永遠滯留——該缺陷已由交易包覆消除）。
+
+### 客戶寫入失敗：拋出 `DataAccessException`，不再以 `customerId = 0` 落庫
+
+Issue #87 修復前，`insertCustomer` 三個區塊（查找、`INSERT`、回讀）的 `SQLException`
+都只被 `System.out.println` 吞掉：`INSERT customers` 失敗且最後的查詢也查無列時，
+方法回傳 `0`；`OrderService.createOrder` 直接把 `0` 設進 `Order.customerId` 並繼續建單，
+資料庫因此出現 `customerId = 0`、指向不存在客戶的訂單列。
+
+現況（Issue #87）：`insertCustomer` 的資料庫錯誤改為拋出 `DataAccessException`
+（`dao/OrdersDAO.java:150-203`，作風與 `cancelOrder`／`updateOrder` 一致），例外直接往
+`createOrder` 外拋。**客戶寫入失敗時不再建立訂單，也不會留下 `customerId = 0`
+的訂單列**；「依 `email` 查找既有客戶就沿用其 `id`」的冪等行為不變。本工單不改
+`createOrder` 的回傳型別，也不改 `order_food` 的 worker／taskdef 定義。
 
 ### 失敗訊號：`null` 讓 `order_food` 轉 `FAILED`
 
@@ -246,6 +259,7 @@ stateDiagram-v2
 | `OrderServiceTest` | `cancelOrderMarksExistingOrderCancelled` | 既有訂單取消回傳 `1`，DB 狀態轉 `CANCELLED` |
 | `OrderServiceTest` | `cancelOrderOnUnknownOrderReturnsZero` | 查無訂單回傳 `0`、不拋錯、不寫入任何列 |
 | `OrderServiceTest` | `createOrderLeavesNoPartialRowsWhenDetailsInsertFails` | 以 SQLite `TRIGGER` 令 `orders_details` 的 `INSERT` 失敗：`createOrder` 回傳 `null`，且 `orders` 與 `orders_details` 都不得殘留該訂單的列（Issue #86 REQ-1 交易回滾） |
+| `OrderServiceTest` | `createOrderFailsWithoutCustomerIdZeroWhenCustomersInsertFails` | 以 SQLite `TRIGGER` 令 `customers` 的 `INSERT` 失敗：`createOrder` 拋出 `DataAccessException`，不留下客戶列、也不新增 `customerId = 0` 的訂單列（Issue #87 REQ-1） |
 | `OrderServiceControllerTest` | `endpointForwardsRequestUnalteredToWorkflowService` | controller 恰好呼叫 service 一次，且傳遞同一個請求物件（不複製／不改寫） |
 | `OrderServiceControllerTest` | `endpointReturnsWorkflowServiceResponseVerbatim` | 成功時 HTTP 200，body 與 service 回傳的是同一個 map |
 | `OrderServiceControllerTest` | `endpointPassesThroughFailureResponse` | 失敗的 error map 也以 HTTP 200 原樣透出，controller 不攔截 |
@@ -255,6 +269,9 @@ stateDiagram-v2
 | `OrdersDAOTest` | `cancelOrderOnlyUpdatesStatusAndReportsMissingRow` | `cancelOrder` 只改 `status`，保留 `restaurantId`／`deliveryAddress`；查無訂單回傳 `0` |
 | `OrdersDAOTest` | `orderStatusSurvivesDatabaseRoundTrip` | 四個狀態可由 DB 文字往返，數量固定為 4 |
 | `OrdersDAOTest` | `insertCustomerIsIdempotentPerEmail` | 同一 email 重複建立客戶回傳同一 `id`，`customers` 只有一列 |
+| `OrdersDAOTest` | `insertCustomerThrowsDataAccessExceptionOnDbError` | `customers` 的 `INSERT` 失敗時 `insertCustomer` 拋出 `DataAccessException`（包裝原始 `SQLException`）而非回傳 `0`（Issue #87 REQ-2） |
+| `OrdersDAOTest` | `insertCustomerThrowsWhenWrittenRowCannotBeReadBack` | `RAISE(IGNORE)` 令 `INSERT` 未真正落庫時，回讀查無列同樣拋出 `DataAccessException`，不把 `0` 當成有效 id（Issue #87 REQ-2 邊界） |
+| `OrdersDAOTest` | `insertCustomerReusesExistingIdEvenWhenInsertWouldFail` | email 已存在時直接沿用既有 `id`，即使 `customers` 的 `INSERT` 被 `TRIGGER` 擋下也不受影響（Issue #87 做法 3 冪等） |
 | `OrdersDAOTest` | `duplicateOrderIdIsRejectedWithError` | 重複 `orderId` 時 `insertOrder` 回傳非空錯誤（`OrderService` 據此回 `null`） |
 | `OrdersDAOTest` | `readUnknownOrderLeavesFieldsUnset` | 回讀不存在的訂單不拋錯，也不覆寫欄位 |
 
