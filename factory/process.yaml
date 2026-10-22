@@ -16,8 +16,8 @@ modules:
       - src/test/java/io/orkes/example/saga/dao/OrdersDAOTest.java
     build_unit: ./gradlew test --no-daemon
     spec: docs/architecture.md
-    readiness: R1
-    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    readiness: R2
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/blob/main/docs/quality/test-coverage.md"
     owner: tradingbot-tw
   - id: inventory
     paths:
@@ -27,8 +27,8 @@ modules:
       - src/main/java/io/orkes/example/saga/pojos/FoodDeliveryRequest.java
     build_unit: ./gradlew test --no-daemon
     spec: docs/architecture.md
-    readiness: R0
-    readiness_evidence: "'no tests cover InventoryService / InventoryDAO (src/test has none)'"
+    readiness: R2
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/blob/main/docs/quality/test-coverage.md"
     owner: tradingbot-tw
   - id: payment
     paths:
@@ -39,8 +39,8 @@ modules:
       - src/test/java/io/orkes/example/saga/dao/PaymentsDAOTest.java
     build_unit: ./gradlew test --no-daemon
     spec: docs/architecture.md
-    readiness: R1
-    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    readiness: R2
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/blob/main/docs/quality/test-coverage.md"
     owner: tradingbot-tw
   - id: shipment
     paths:
@@ -53,8 +53,8 @@ modules:
       - src/test/java/io/orkes/example/saga/dao/ShipmentDAOTest.java
     build_unit: ./gradlew test --no-daemon
     spec: docs/architecture.md
-    readiness: R1
-    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    readiness: R2
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/blob/main/docs/quality/test-coverage.md"
     owner: tradingbot-tw
   - id: workflow
     paths:
@@ -68,6 +68,6 @@ modules:
       - "src/test/java/io/orkes/example/saga/workers/**"
     build_unit: ./gradlew test --no-daemon
     spec: docs/architecture.md
-    readiness: R1
-    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/actions/runs/37170942352"
+    readiness: R2
+    readiness_evidence: "https://github.com/tradingbot-tw/saga-pattern/blob/main/docs/quality/test-coverage.md"
     owner: tradingbot-tw
