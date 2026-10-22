@@ -2,6 +2,8 @@
 
 > 分析基準：`software-factory` 分支 @ `975bb43`。所有陳述以現行程式碼為準，
 > 附「檔案:行號」證據；若文件與實作不符，**以程式碼為準**。
+> **Issue #83 修正後**：`payments.method` 改存遮罩後的稽核字串（見 §4、§7），
+> 不再寫入完整卡號、`cvv` 或 `expiry`；其餘分析基準與行號引用仍以 `975bb43` 為準。
 > ⚠️ 本模組的付款是**模擬**的（範例專案，無任何真實金流／支付閘道整合），
 > 全文不得被解讀為真實刷卡流程的規格。
 
@@ -94,8 +96,11 @@ stateDiagram-v2
     1–12 依 JDK `SimpleDateFormat` 預設（lenient）進位。
 - **其他付款方式（如 `Cash`）不做任何檢查、直接核准**（`PaymentService.java:63,86`）。
   卡號、CVV、金額在任何路徑上都不參與驗證。
-- 「落庫」的 `method` 欄存的是 `PaymentMethod.toString()` 的文字序列化
-  （`PaymentsDAO.java:24`）；範例專案的測試值皆為樣板字串，不涉及真實憑證。
+- 「落庫」的 `method` 欄存的是**遮罩後的稽核字串**（Issue #83）：付款方式 `type`
+  加上卡號後四碼（例如 `Credit Card ****1111`），沒有卡號時只存 `type`；完整卡號、
+  `cvv` 與 `expiry` 都不寫入（`PaymentsDAO.toAuditMethodString`）。既有資料庫中在
+  此修正前已寫入的明文資料不會被回溯清理。範例專案的測試值皆為樣板字串，
+  不涉及真實憑證。
 
 > ⚠️ 再次強調：上述驗證範圍刻意狹窄，屬教學用模擬。不得據本文件推論任何
 > 真實金流的核准、拒付或退款行為。
@@ -135,18 +140,20 @@ stateDiagram-v2
 
 ### `PaymentsDAOTest`（DAO 層，`src/test/java/io/orkes/example/saga/dao/PaymentsDAOTest.java`）
 
-使用暫時性的獨立 DB（L27-37）：
+使用暫時性的獨立 DB（L29-39）：
 
 | 測試 | 保護的行為 |
 |---|---|
-| `insertPaymentPersistsAsPending`（L64） | 插入初始狀態 `PENDING` 成功（回傳空字串）、可依 `orderId` 回讀，含 `createdAt` |
-| `updatePaymentStatusToSuccessful`（L82） | `PENDING → SUCCESSFUL` 更新回傳 1 列、回讀一致 |
-| `updateUnknownPaymentReturnsZero`（L97） | 更新不存在的 `paymentId` 回 0（分支 A 最後一次 UPDATE 為 no-op 的機制） |
-| `cancelPaymentsByOrderIdCancelsEveryPayment`（L107） | 同一訂單多筆付款**一次全部** `CANCELED`（回傳 2）——§2 多重付款細節 |
-| `cancelPaymentsByOrderIdReturnsZeroForUnknownOrder`（L124） | 查無付款回 0，給 worker 回報終端錯誤的訊號 |
-| `updatePaymentStatusToCancelledAsCompensation`（L131） | `SUCCESSFUL → CANCELED` 的補償更新路徑 |
-| `duplicatePaymentIdIsRejectedWithError`（L148） | `insertPayment` 對主鍵衝突回傳**非空**錯誤（含 `PRIMARY KEY`）——分支 A 的觸發來源之一 |
-| `paymentStatusSurvivesDatabaseRoundTrip`（L161） | 狀態列舉恰為四值，可經 DB 文字往返（§2 前提） |
+| `insertPaymentPersistsAsPending`（L115） | 插入初始狀態 `PENDING` 成功（回傳空字串）、可依 `orderId` 回讀，含 `createdAt` |
+| `insertPaymentStoresMaskedPaymentMethod`（L71） | `method` 欄只存 `type` 與卡號後四碼，不含完整卡號、`cvv`、`expiry` |
+| `insertPaymentStoresOnlyTypeWhenNoCardNumber`（L91） | 沒有卡號時 `method` 欄只存 `type` |
+| `updatePaymentStatusToSuccessful`（L133） | `PENDING → SUCCESSFUL` 更新回傳 1 列、回讀一致 |
+| `updateUnknownPaymentReturnsZero`（L148） | 更新不存在的 `paymentId` 回 0（分支 A 最後一次 UPDATE 為 no-op 的機制） |
+| `cancelPaymentsByOrderIdCancelsEveryPayment`（L158） | 同一訂單多筆付款**一次全部** `CANCELED`（回傳 2）——§2 多重付款細節 |
+| `cancelPaymentsByOrderIdReturnsZeroForUnknownOrder`（L175） | 查無付款回 0，給 worker 回報終端錯誤的訊號 |
+| `updatePaymentStatusToCancelledAsCompensation`（L182） | `SUCCESSFUL → CANCELED` 的補償更新路徑 |
+| `duplicatePaymentIdIsRejectedWithError`（L199） | `insertPayment` 對主鍵衝突回傳**非空**錯誤（含 `PRIMARY KEY`）——分支 A 的觸發來源之一 |
+| `paymentStatusSurvivesDatabaseRoundTrip`（L212） | 狀態列舉恰為四值，可經 DB 文字往返（§2 前提） |
 
 worker 層的三態翻譯（`COMPLETED`／`FAILED_WITH_TERMINAL_ERROR`／`FAILED`）
 由 `ConductorWorkersTest`（`make_payment` L159/L172、`cancel_payment` L271/L286/L301/L322）
@@ -162,7 +169,7 @@ worker 層的三態翻譯（`COMPLETED`／`FAILED_WITH_TERMINAL_ERROR`／`FAILED
 | `paymentId` | text，PRIMARY KEY | UUID 字串（每次 `createPayment` 新產生，`PaymentService.java:23-27`） |
 | `orderId` | text NOT NULL | 來自 `PaymentRequest` |
 | `amount` | number NOT NULL | 來自 `PaymentRequest` |
-| `method` | text | `PaymentMethod.toString()` 文字序列化（`PaymentsDAO.java:24`） |
+| `method` | text | 遮罩後的稽核字串：`type` 加卡號後四碼（例如 `Credit Card ****1111`）；無卡號時只存 `type`。不含完整卡號、`cvv`、`expiry`（Issue #83，`PaymentsDAO.toAuditMethodString`） |
 | `status` | text | `Payment.Status.name()`：`PENDING`／`SUCCESSFUL`／`FAILED`／`CANCELED` |
 | `createdAt` | TIMESTAMP NOT NULL | 插入當下時間（`PaymentsDAO.java:15-16,25`） |
 
