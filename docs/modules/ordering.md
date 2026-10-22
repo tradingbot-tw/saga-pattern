@@ -62,9 +62,23 @@ ArrayList<FoodItem>`／`PaymentMethod` 的對齊依賴 Conductor 的序列化行
   "address": "100 Example Street, Springfield",
   "deliveryInstructions": "放在門口",
   "paymentAmount": 35.5,
-  "paymentMethod": { "type": "Credit Card" }
+  "paymentMethod": {
+    "type": "Credit Card",
+    "details": { "number": "<測試卡號>", "expiry": "12/2030", "cvv": 0 }
+  }
 }
 ```
+
+`paymentMethod` 的結構對應 `PaymentMethod{type, details}` 與 `PaymentDetails{number, expiry, cvv}`
+（`pojos/PaymentMethod.java`、`pojos/PaymentDetails.java`），三個細節必須照實填：
+
+- `type` 必須**完全等於** `"Credit Card"` 才會檢查到期日；`CREDIT_CARD`、`credit card` 等寫法會跳過檢查、直接核准
+  （`service/PaymentService.java:64`）。
+- `type` 是 `"Credit Card"` 時 **`details` 不可省略**：`makePayment` 會直接讀 `details.getExpiry()`，
+  `details` 為 `null` 時丟出 `NullPointerException`，`make_payment` 失敗。
+- `expiry` 的格式是 `MM/yyyy`（`12/2030`，不是 `12/30`）；已過期或格式錯誤都會讓付款失敗。
+
+範例刻意不放真實或可用的卡號；`number` 不參與任何驗證，填任意字串即可。
 
 ```bash
 curl -sS -X POST http://localhost:8081/triggerFoodDeliveryFlow \
@@ -111,6 +125,9 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
 - `orders` 寫入成功、`orders_details` 寫入失敗時，`orders` 會留下沒有明細的半成品列，
   但 `createOrder` 仍回傳 `null`。
 - 訂單寫入失敗時，步驟 1 已建立的 `customers` 列不會回滾。
+- **這筆半成品訂單不會被補償**：`createOrder` 回傳 `null` 讓 `order_food` 轉 `FAILED`，而補償流程對
+  `order_food` 失敗不做任何事（見下一節），所以該列會**永遠停在 `PENDING`**，沒有任何機制取消它。
+  這是現行實作的缺陷，修正方向是把兩個 `INSERT` 放進同一個交易。
 
 ### 失敗訊號：`null` 讓 `order_food` 轉 `FAILED`
 
@@ -124,7 +141,12 @@ workflow 掛有 `failureWorkflow: FoodDeliveryFailureWorkflow`
 （`conductor/workflows/FoodDeliveryWorkflow.v1.json`）。該補償 workflow 的
 `switch_compensate_from` **沒有 `order_food_ref` 分支**、`defaultCase` 為空
 （`conductor/workflows/FoodDeliveryFailureWorkflow.v1.json`），所以 `order_food` 失敗時
-不會執行 `cancel_order`（也沒有訂單可取消）；最後的 `notify_customer` 仍會執行。
+不會執行 `cancel_order`；最後的 `notify_customer` 仍會執行。
+
+這個設計假設「`order_food` 失敗＝沒有建立訂單」，但上一節的情況並不成立：`orders` 已寫入、
+`orders_details` 失敗時，資料庫**有**一筆 `PENDING` 訂單，補償流程卻不會取消它。要讓補償涵蓋這種
+情況，必須先讓 `createOrder` 在失敗時不留下任何訂單列（交易），而不是在補償 workflow 加
+`order_food_ref` 分支——失敗時 `order_food` 輸出的 `orderId` 是 `null`，補償拿不到可取消的訂單。
 
 ## cancelOrder：補償語意
 
