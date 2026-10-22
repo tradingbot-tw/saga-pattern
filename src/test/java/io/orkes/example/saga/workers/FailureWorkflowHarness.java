@@ -92,13 +92,13 @@ final class FailureWorkflowHarness {
      * {@code failedReferenceTaskNames} 依 conductor-oss
      * {@code WorkflowExecutorOps.terminateWorkflow}（core/.../WorkflowExecutorOps.java L816-836）收集。
      */
-    static JsonNode failedWorkflow(Workflow.WorkflowStatus status, List<Task> tasks) {
+    static JsonNode failedWorkflow(String workflowId, Workflow.WorkflowStatus status, List<Task> tasks) {
         WorkflowDef def = new WorkflowDef();
         def.setName("FoodDeliveryWorkflow");
         def.setVersion(1);
 
         Workflow workflow = new Workflow();
-        workflow.setWorkflowId(UUID.randomUUID().toString());
+        workflow.setWorkflowId(workflowId);
         workflow.setWorkflowDefinition(def);
         workflow.setCreateTime(System.currentTimeMillis());
         workflow.setStatus(status);
@@ -166,24 +166,26 @@ final class FailureWorkflowHarness {
         return new Run(extracted, switchKey, executed, "COMPLETED");
     }
 
+    /**
+     * 依定義檔的 {@code inputParameters} 組出 task 輸入（解析 {@code ${...}}），再以 Conductor 的
+     * ObjectMapper 綁定到 worker 參數 POJO，與 SDK 的 AnnotatedWorker 相同。
+     */
     private boolean runSimple(JsonNode task, JsonNode extracted, String customerEmail, String customerName,
                               List<String> executed) {
         String name = task.get("name").asText();
         String ref = task.get("taskReferenceName").asText();
-        JsonNode orderIdNode = extracted.get("orderId");
-        String orderId = orderIdNode == null || orderIdNode.isNull() ? null : orderIdNode.asText();
+        Map<String, Object> input = new HashMap<>();
+        task.get("inputParameters").fields().forEachRemaining(e ->
+                input.put(e.getKey(), resolve(e.getValue(), extracted, customerEmail, customerName)));
 
         TaskResult.Status status;
         switch (name) {
-            case "cancel_order" -> status = workers.cancelOrderTask(cancel(orderId)).getStatus();
-            case "cancel_payment" -> status = workers.cancelPaymentTask(cancel(orderId)).getStatus();
-            case "cancel_delivery" -> status = workers.cancelDeliveryTask(cancel(orderId)).getStatus();
+            case "cancel_order" -> status = workers.cancelOrderTask(bind(input, CancelRequest.class)).getStatus();
+            case "cancel_payment" -> status = workers.cancelPaymentTask(bind(input, CancelRequest.class)).getStatus();
+            case "cancel_delivery" -> status = workers.cancelDeliveryTask(bind(input, CancelRequest.class)).getStatus();
             case "notify_customer" -> {
-                CustomerNotificationRequest request = new CustomerNotificationRequest();
-                request.setOrderId(orderId);
-                request.setCustomerEmail(customerEmail);
-                request.setCustomerName(customerName);
-                workers.checkForCustomerNotifications(request);   // 回傳 Map → SDK 標成 COMPLETED
+                // 回傳 Map → SDK 標成 COMPLETED
+                workers.checkForCustomerNotifications(bind(input, CustomerNotificationRequest.class));
                 status = TaskResult.Status.COMPLETED;
             }
             default -> throw new IllegalStateException("harness 不支援的 worker: " + name);
@@ -192,10 +194,30 @@ final class FailureWorkflowHarness {
         return status == TaskResult.Status.COMPLETED;
     }
 
-    private static CancelRequest cancel(String orderId) {
-        CancelRequest request = new CancelRequest();
-        request.setOrderId(orderId);
-        return request;
+    private static Object resolve(JsonNode value, JsonNode extracted, String customerEmail, String customerName) {
+        if (!value.isTextual()) {
+            return CONDUCTOR_MAPPER.convertValue(value, Object.class);
+        }
+        String text = value.asText();
+        String resultPrefix = "${extract_failure_context_ref.output.result.";
+        if (text.startsWith(resultPrefix) && text.endsWith("}")) {
+            JsonNode n = extracted.get(text.substring(resultPrefix.length(), text.length() - 1));
+            return n == null || n.isNull() ? null : n.asText();
+        }
+        return switch (text) {
+            case "${workflow.input.customerEmail}" -> customerEmail;
+            case "${workflow.input.customerName}" -> customerName;
+            default -> {
+                if (text.contains("${")) {
+                    throw new IllegalStateException("harness 無法解析的引用: " + text);
+                }
+                yield text;
+            }
+        };
+    }
+
+    private static <T> T bind(Map<String, Object> input, Class<T> type) {
+        return CONDUCTOR_MAPPER.convertValue(input, type);
     }
 
     private static JsonNode jq(String query, JsonNode input) throws Exception {

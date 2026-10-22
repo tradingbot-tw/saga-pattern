@@ -1,6 +1,6 @@
 {
   "name": "FoodDeliveryFailureWorkflow",
-  "description": "Compensation for FoodDeliveryWorkflow (attached via failureWorkflow). Follows the conductor-sdk saga example: extract the failed task, then compensate only the steps that completed. See conductor/PROVENANCE.md.",
+  "description": "Compensation for FoodDeliveryWorkflow (attached via failureWorkflow). Does not depend on which task failed: always cancels delivery, payment and order in reverse order with allowMissing=true (a step that never wrote data is a no-op), then notifies the customer. orderId falls back to the failed workflow's workflowId, which order_food uses as the order id. See conductor/PROVENANCE.md and specs/saga.qnt (CurrentWorkflow).",
   "version": 1,
   "schemaVersion": 2,
   "restartable": true,
@@ -22,111 +22,35 @@
       "type": "JSON_JQ_TRANSFORM",
       "inputParameters": {
         "parent": "${workflow.input.failedWorkflow}",
-        "queryExpression": "{ orderId: (.parent.output.orderId // first(.parent.tasks[]? | select(.referenceTaskName == \"order_food_ref\") | .outputData.orderId)), failedTaskName: .parent.failedReferenceTaskNames[0] }"
+        "queryExpression": "{ orderId: (.parent.output.orderId // first(.parent.tasks[]? | select(.referenceTaskName == \"order_food_ref\") | .outputData.orderId) // .parent.workflowId), failedTaskName: .parent.failedReferenceTaskNames[0] }"
       }
     },
     {
-      "name": "switch_compensate_from",
-      "taskReferenceName": "switch_compensate_from_ref",
-      "type": "SWITCH",
-      "evaluatorType": "value-param",
-      "expression": "failedTaskName",
+      "name": "cancel_delivery",
+      "taskReferenceName": "cancel_delivery_ref",
+      "type": "SIMPLE",
       "inputParameters": {
-        "failedTaskName": "${extract_failure_context_ref.output.result.failedTaskName}"
-      },
-      "decisionCases": {
-        "check_inventory_ref": [
-          {
-            "name": "cancel_order",
-            "taskReferenceName": "cancel_order_after_inventory_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          }
-        ],
-        "make_payment_ref": [
-          {
-            "name": "cancel_order",
-            "taskReferenceName": "cancel_order_after_payment_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          }
-        ],
-        "ship_food_ref": [
-          {
-            "name": "cancel_payment",
-            "taskReferenceName": "cancel_payment_after_shipment_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          },
-          {
-            "name": "cancel_order",
-            "taskReferenceName": "cancel_order_after_shipment_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          }
-        ],
-        "notify_driver_ref": [
-          {
-            "name": "cancel_delivery",
-            "taskReferenceName": "cancel_delivery_after_notify_driver_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          },
-          {
-            "name": "cancel_payment",
-            "taskReferenceName": "cancel_payment_after_notify_driver_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          },
-          {
-            "name": "cancel_order",
-            "taskReferenceName": "cancel_order_after_notify_driver_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          }
-        ],
-        "notify_customer_ref": [
-          {
-            "name": "cancel_delivery",
-            "taskReferenceName": "cancel_delivery_after_notify_customer_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          },
-          {
-            "name": "cancel_payment",
-            "taskReferenceName": "cancel_payment_after_notify_customer_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          },
-          {
-            "name": "cancel_order",
-            "taskReferenceName": "cancel_order_after_notify_customer_ref",
-            "type": "SIMPLE",
-            "inputParameters": {
-              "orderId": "${extract_failure_context_ref.output.result.orderId}"
-            }
-          }
-        ]
-      },
-      "defaultCase": []
+        "orderId": "${extract_failure_context_ref.output.result.orderId}",
+        "allowMissing": true
+      }
+    },
+    {
+      "name": "cancel_payment",
+      "taskReferenceName": "cancel_payment_ref",
+      "type": "SIMPLE",
+      "inputParameters": {
+        "orderId": "${extract_failure_context_ref.output.result.orderId}",
+        "allowMissing": true
+      }
+    },
+    {
+      "name": "cancel_order",
+      "taskReferenceName": "cancel_order_ref",
+      "type": "SIMPLE",
+      "inputParameters": {
+        "orderId": "${extract_failure_context_ref.output.result.orderId}",
+        "allowMissing": true
+      }
     },
     {
       "name": "notify_customer",

@@ -44,15 +44,19 @@
 
 ### 補償對照表（依程式碼判斷每個失敗點留下的資料）
 
-| 失敗的步驟 | 資料庫留下什麼 | 補償 |
+| 失敗的步驟 | 資料庫留下什麼 | 補償（現行） |
 |---|---|---|
-| `order_food` | 沒有訂單（`insertOrder` 失敗即回 null） | 無（走 `defaultCase`） |
-| `check_inventory` | 訂單 | `cancel_order` |
-| `make_payment` | 訂單；通常另有一筆 FAILED 付款（先 insert，付款失敗只改狀態） | `cancel_payment` → `cancel_order` |
-| `ship_food` | 訂單、付款；出貨失敗時 `ShipmentService` 已自行 `cancelShipment` | `cancel_payment` → `cancel_order`（不重複取消出貨） |
-| `notify_driver`／`notify_customer` | 訂單、付款、出貨 | `cancel_delivery` → `cancel_payment` → `cancel_order` |
+| 任何步驟 | 不一定；逾時或資料庫例外時可能留下部分資料（含 `SCHEDULED` 出貨單） | `cancel_delivery` → `cancel_payment` → `cancel_order`，皆帶 `allowMissing=true`（查無資料為 no-op） |
 
-補償順序與正向步驟相反（Saga 慣例，與官方範例一致）。最後一律以 `notify_customer` 通知失敗。
+補償順序與正向步驟相反（Saga 慣例）。最後一律以 `notify_customer` 通知失敗。
+
+> **2026-10-22（#136–#139）**：原本的設計是用 `SWITCH` 依 `failedReferenceTaskNames[0]`
+> 只補償「失敗點之前已完成」的步驟。這個前提不成立：該集合是 Java `HashSet`（順序不可依賴）、
+> 含已被重試的失敗嘗試（`check_inventory` 的重試）、且**不含 `TIMED_OUT` 的 task**。
+> 反例 A–D 見 `specs/saga.qnt`（`saga_switch`）與 `SagaCompensationDefectTest`。
+> 現行設計改為不看失敗點、一律反向取消，並讓 `cancel_*` 對「查無資料」冪等。
+> 同時 `order_food` 的 `orderId` 改由 `${workflow.workflowId}` 決定，讓補償在 `order_food`
+> 逾時、`output` 尚未計算時仍能定址訂單。
 
 ## 5. 推論（未經 server 驗證，列為待確認）
 
@@ -64,8 +68,8 @@
 
 ## 6. 待決問題（需人類裁定）
 
-1. ~~早期失敗時的補償語意~~ **已解決**：照官方範例改用 `SWITCH`，只補償失敗前已完成的步驟（見 §4 的補償對照表），因此不會出現「取消不存在的付款而讓補償流程失敗」。
-2. **未綁定的 POJO 欄位**：`order_food.OrderRequestId`、`make_payment.customerId`、`notify_driver.pickUp` 沒有任何來源（TB1 報告 §9 第 6 題）。目前保持未綁定；兩個通知 worker 皆為 placeholder，不影響行為。
+1. ~~早期失敗時的補償語意~~ **已解決**（2026-10-22，改法更新）：不再依失敗點判斷，改成一律反向、冪等的取消（見 §4）。原本的 `SWITCH` 方案在 #136–#139 被移除，因為它依賴不可靠的 `failedReferenceTaskNames[0]`。
+2. **未綁定的 POJO 欄位**：`make_payment.customerId`、`notify_driver.pickUp` 沒有任何來源（TB1 報告 §9 第 6 題）。目前保持未綁定；兩個通知 worker 皆為 placeholder，不影響行為。`order_food` 的欄位已改名為 `orderId` 並綁定 `${workflow.workflowId}`。
 3. **`paymentMethod` 形狀**：起始輸入直接傳入 `PaymentMethod{type, details}` 物件（TB1 報告 G6）。
 
 ## 7. 驗證
@@ -79,18 +83,28 @@
 
 - 註冊：9 個 TaskDef（`POST /metadata/taskdefs`）、`FoodDeliveryFailureWorkflow`、`FoodDeliveryWorkflow`（`PUT /metadata/workflow`）到 `https://developer.orkescloud.com/api`，皆 HTTP 200；不需要 `ownerEmail`。
 - 讀回比對：本目錄 11 個檔案的每一個欄位，在 server 上的值完全一致。server 另加的欄位（建立／更新時間與建立者、`ownerEmail`、預設值）只存在 server，不回寫本目錄。
-- 端到端實測（以 API 扮演 worker，不指定 task domain，測試資料為 `tb2-verify@example.invalid`）：
+- 端到端實測（**2026-10-21，SWITCH 版定義，已過時**；現行定義的驗證見 §7.1）：
   - 主流程：`order_food` 收到正確對映的輸入 → 回 `orderId`；`check_inventory` 完成；`make_payment` 收到 `orderId` → 模擬 `FAILED_WITH_TERMINAL_ERROR`。主流程 `FAILED`，`output.orderId` 有值，`failedReferenceTaskNames = [make_payment_ref]`，並自動啟動補償流程。
   - 補償流程的輸入含原 workflow 的 `customerEmail`、`customerName`，另有 `workflowId`、`reason`、`failedWorkflow`。
   - JQ 擷取得到 `orderId = verify-order-1`、`failedTaskName = make_payment_ref`；`SWITCH` 走 `make_payment_ref` 分支：`cancel_payment` → `cancel_order` → `notify_customer`（帶 email 與姓名），**沒有**排程 `cancel_delivery`；補償流程 `COMPLETED`。
   - 執行紀錄：主流程 `ld3t5ead1f4f-cd0d-11f1-aff9-321d2204384c`、補償流程 `ld3t616ba4eb-cd0d-11f1-ba7a-56adf5b8ca14`（correlationId `tb2-verify`）。
 
+### 7.1 #136–#139 的驗證（2026-10-22）
+
+- 本機：`SagaCompensationDefectTest` 以版控中的 JSON 執行補償流程（Conductor `Workflow`/`Task` 物件、
+  jackson-jq、真實 `cancel_*` worker 與 SQLite，資料庫錯誤以 SQLite trigger 注入）；同一組測試在
+  SWITCH 版定義下有 5 個情境失敗，在現行定義下全部通過。
+- 雲端：`OrkesCloudE2EVerificationTest` 重新註冊定義後以真實 Orkes Cloud 驗證 4 個情境
+  （付款被拒、重試後的失敗集合、`make_payment` 逾時、`confirmShipment` 失敗留下的 `SCHEDULED` 出貨單），
+  並斷言 server 實際傳給 worker 的 `orderId` 等於 `workflowId`、`allowMissing=true`。
+  E2E 結果與執行紀錄見該測試輸出。
+
 ## 8. 檔案雜湊（SHA-256）
 
 | 檔案 | SHA-256 |
 |---|---|
-| `workflows/FoodDeliveryFailureWorkflow.v1.json` | `ee4e5a14cc63543bf7592899d098f5fda4c5eedd9573c6a5bec9167dc09ece75` |
-| `workflows/FoodDeliveryWorkflow.v1.json` | `79ad282c8a247f853dad30d4934d9f412380778a868d766356f16baa86e830cf` |
+| `workflows/FoodDeliveryFailureWorkflow.v1.json` | `b1deb36773c1668715cb96784e284f8cebf4f769c6dd000355805f2e55474ab8` |
+| `workflows/FoodDeliveryWorkflow.v1.json` | `9abaa85ed5d0f170e4f6c1fa2caa4612e7dddcbb6117eb1657cd90d1b54b019d` |
 | `taskdefs/cancel_delivery.json` | `9747760e866711d43b4bb95242435bf511b2c6887f065e9b47743541f1d6369f` |
 | `taskdefs/cancel_order.json` | `f18f9b359b4e5c0de0aefcd73c7d3950a8d199401f267ee725093d417c48371c` |
 | `taskdefs/cancel_payment.json` | `71b4fb474690757cfc139054571ef1e793d4ae2f59ce90da18609f81ed849da0` |
