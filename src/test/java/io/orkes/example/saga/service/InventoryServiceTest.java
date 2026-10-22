@@ -3,7 +3,6 @@ package io.orkes.example.saga.service;
 import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.pojos.FoodItem;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -92,14 +91,13 @@ class InventoryServiceTest {
     // ===================================================================
     // Issue #85：「餐廳可用」判斷的空白／NULL 邊界。
     //
-    // 現行實作 `!Objects.equals(name, "")` 只比對空字串：name 為空白字串或
-    // NULL 時仍回 true（可用），與 docs/modules/inventory.md §2.1 描述的
-    // 缺陷一致。以下兩個測試在修復（02-impl）前是紅燈，先以 @Disabled
-    // 提交（斷言完整保留），02-impl 層解開並修復判斷式。
+    // 修前的 `!Objects.equals(name, "")` 只比對空字串：name 為空白字串或
+    // NULL 時仍回 true（可用），與 docs/modules/inventory.md §2.1 原本的
+    // 描述一致。本測試層（01-test）以 @Disabled 提交紅燈斷言，02-impl
+    // 判斷式改為 `name != null && !name.isBlank()` 後啟用，两者皆應綠燈。
     // ===================================================================
 
     @Test
-    @Disabled("Issue #85 修復前紅燈：空白名稱目前被視為可用。02-impl 修復後啟用")
     @DisplayName("邊界（Issue #85）：name 為空白字串的餐廳 → checkAvailability 回傳 false")
     void checkAvailabilityReturnsFalseForBlankNameRestaurant() throws SQLException {
         int restaurantId = insertRestaurant("   ");
@@ -112,7 +110,6 @@ class InventoryServiceTest {
     }
 
     @Test
-    @Disabled("Issue #85 修復前紅燈：NULL 名稱目前被視為可用。02-impl 修復後啟用")
     @DisplayName("邊界（Issue #85）：name 為 NULL → 判斷式回傳 false（NOT NULL 限制無法插入，直接驗證 hasUsableName）")
     void nullNameIsNotUsable() {
         assertFalse(InventoryService.hasUsableName(null),
