@@ -1,6 +1,7 @@
 package io.orkes.example.saga.service;
 
 import io.orkes.example.saga.SagaTestDb;
+import io.orkes.example.saga.dao.DataAccessException;
 import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
@@ -18,6 +19,7 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * {@link OrderService} 的步驟行為測試（Issue #60）。
@@ -183,5 +185,44 @@ class OrderServiceTest {
                         "SELECT COUNT(*) FROM orders_details WHERE orderId IN "
                                 + "(SELECT orderId FROM orders WHERE " + customerFilter + ")"),
                 "orders_details 亦不得殘留任何列");
+    }
+
+    @Test
+    @DisplayName("REQ-1 客戶寫入失敗：customers 的 INSERT 失敗時 createOrder 失敗，且資料庫不得留下 customerId = 0 的訂單列")
+    void createOrderFailsWhenCustomerInsertFails() throws Exception {
+        String email = SagaTestDb.uniqueId("nocus") + "@example.com";
+
+        // 以差值斷言，避免共用應用資料庫中其他測試／前次執行留下的列干擾。
+        int zeroCustomerBefore = SagaTestDb.count(URL,
+                "SELECT COUNT(*) FROM orders WHERE customerId = 0");
+        int danglingBefore = SagaTestDb.count(URL,
+                "SELECT COUNT(*) FROM orders o WHERE NOT EXISTS "
+                        + "(SELECT 1 FROM customers c WHERE c.id = o.customerId)");
+
+        // 故障注入：BEFORE INSERT TRIGGER 讓 customers 的寫入一律失敗；該 email 不存在，
+        // 因此 insertCustomer 一定會走到 INSERT 分支（Issue #87 驗證方式）。
+        exec("CREATE TRIGGER issue87_fail_customer BEFORE INSERT ON customers "
+                + "BEGIN SELECT RAISE(ABORT, 'Issue #87: simulated customers INSERT failure'); END");
+        try {
+            assertThrows(DataAccessException.class,
+                    () -> OrderService.createOrder(
+                            request(email, "43 West 4th Street, New York NY 10024")),
+                    "客戶寫入失敗必須讓 createOrder 失敗，不得以 customerId = 0 繼續建單");
+        } finally {
+            exec("DROP TRIGGER issue87_fail_customer");
+        }
+
+        assertEquals(zeroCustomerBefore, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM orders WHERE customerId = 0"),
+                "資料庫不得新增 customerId = 0 的訂單列");
+
+        assertEquals(danglingBefore, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM orders o WHERE NOT EXISTS "
+                                + "(SELECT 1 FROM customers c WHERE c.id = o.customerId)"),
+                "資料庫不得新增指向不存在客戶的訂單列");
+
+        assertNull(SagaTestDb.queryString(URL,
+                        "SELECT id FROM customers WHERE email = '" + email + "'"),
+                "INSERT 失敗時不得留下客戶列");
     }
 }

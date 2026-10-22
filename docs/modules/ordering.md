@@ -13,9 +13,9 @@ ordering 是系統唯一的對外入口。本文說明 `POST /triggerFoodDeliver
 | --- | --- | --- |
 | `OrderServiceController` | `src/main/java/io/orkes/example/saga/controller/OrderServiceController.java:23-26` | 接收 `FoodDeliveryRequest`，原樣交給 `WorkflowService`，固定以 HTTP 200 回傳其結果 |
 | `WorkflowService` | `src/main/java/io/orkes/example/saga/service/WorkflowService.java:22-60` | 組裝 workflow input、啟動 `FoodDeliveryWorkflow` v1；啟動例外時回傳 error map |
-| `OrderService.createOrder` | `src/main/java/io/orkes/example/saga/service/OrderService.java:21-59` | 建立客戶與訂單，回傳 orderId；任一寫入失敗回傳 `null` |
+| `OrderService.createOrder` | `src/main/java/io/orkes/example/saga/service/OrderService.java:21-59` | 建立客戶與訂單，回傳 orderId；`insertOrder` 失敗回傳 `null`，客戶 upsert 失敗丟出 `DataAccessException`（Issue #87） |
 | `OrderService.cancelOrder` | `src/main/java/io/orkes/example/saga/service/OrderService.java:67-76` | 取消訂單，回傳受影響列數 |
-| `OrdersDAO` | `src/main/java/io/orkes/example/saga/dao/OrdersDAO.java:18-186` | `orders`／`orders_details`／`customers` 的 SQLite CRUD |
+| `OrdersDAO` | `src/main/java/io/orkes/example/saga/dao/OrdersDAO.java:18-211` | `orders`／`orders_details`／`customers` 的 SQLite CRUD |
 | `ConductorWorkers.orderFoodTask` | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:26-41` | `order_food` task：呼叫 `createOrder`，把 `null` 轉成 `FAILED` |
 | `ConductorWorkers.cancelOrderTask` | `src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java:181-196` | `cancel_order` task：把列數與例外轉成 task 狀態 |
 | `Order.Status` | `src/main/java/io/orkes/example/saga/pojos/Order.java:10-15` | 訂單狀態列舉（以 `name()` 字串落地） |
@@ -115,7 +115,7 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
 
 | 步驟 | 實作 | 資料庫效果 |
 | --- | --- | --- |
-| 1. 建立客戶 | `OrdersDAO.insertCustomer`（`dao/OrdersDAO.java:150-186`） | 先以 `email` 查 `customers`：已存在就沿用該 `id`（**不更新** name／contact）；不存在則 `INSERT` 後再查回 `id` |
+| 1. 建立客戶 | `OrdersDAO.insertCustomer`（`dao/OrdersDAO.java:162-210`） | 先以 `email` 查 `customers`：已存在就沿用該 `id`（**不更新** name／contact）；不存在則 `INSERT` 後再查回 `id`。資料庫錯誤一律拋出 `DataAccessException`，**不以 `0` 當成有效 id**（Issue #87） |
 | 2. 建立訂單 | `OrderService.createOrder`（`service/OrderService.java:22-39`） | 產生隨機 UUID 作為 `orderId`；狀態固定 `PENDING`；帶入 `restaurantId`、`deliveryAddress` |
 | 3. 寫入訂單與明細 | `OrdersDAO.insertOrder`（`dao/OrdersDAO.java:18-79`） | 同一連線、同一交易（Issue #86）依序 `INSERT INTO orders`、`INSERT INTO orders_details`（`items`／`notes`），兩步全成才 `commit`。`items` 與 `notes` 以 Java 集合的 `toString()` 字串落地，不是結構化 JSON |
 | 4. 回傳結果 | `OrderService.createOrder`（`service/OrderService.java:48-58`） | `insertOrder` 回傳空字串代表成功，回傳 UUID；回傳非空錯誤訊息時記 log 並回傳 `null` |
@@ -132,13 +132,39 @@ DAO 連線字串在 service 內寫死為 `jdbc:sqlite:food_delivery.db`（`servi
   `order_food` 轉 `FAILED`，而補償流程對 `order_food` 失敗不做任何事（見下一節），
   已寫入的 `PENDING` 列會永遠滯留——該缺陷已由交易包覆消除）。
 
-### 失敗訊號：`null` 讓 `order_food` 轉 `FAILED`
+### 客戶 upsert 失敗：不得以 `customerId = 0` 建單（Issue #87）
+
+步驟 1 的三個 SQL 區塊（查找既有客戶、`INSERT`、重新查回 `id`）過去都把 `SQLException`
+只印到 stdout 後吞掉。若該 email 不存在且 `INSERT` 失敗，重新查詢也查不到列，
+`insertCustomer` 便回傳 `0`；`createOrder` 直接把 `0` 設進 `Order.customerId` 並繼續
+建立訂單，資料庫於是出現 `customerId = 0`、指向不存在客戶的訂單列。`orders.customerId`
+沒有外鍵約束，資料庫不會擋下這種列。
+
+現在 `OrderService.createOrder` 的步驟 1 契約是（`dao/OrdersDAO.java:162-210`）：
+
+- 依 `email` 找到既有客戶時，**仍然沿用其 `id`**，不重複 `INSERT`（冪等行為不變）。
+- 查找、`INSERT`、重新查回 `id` 任一區塊發生 `SQLException` 時，包成
+  `DataAccessException` 往外拋（與 `cancelOrder` 的失敗風格一致），不再只印訊息。
+- `INSERT` 成功後若仍查不回有效 `id`，同樣拋出 `DataAccessException`——
+  `insertCustomer` **不會回傳 `0`**。
+- 例外沒有被 `createOrder` 吞掉：`createOrder` 因此失敗，不會再往下執行
+  `insertOrder`，資料庫也就不會出現 `customerId = 0` 的訂單列。
+
+失敗時步驟 1 已寫入的 `customers` 列（若有的話）不會回滾（`insertCustomer` 在
+`insertOrder` 的交易之外）；本工單只保證不建立指向不存在客戶的訂單列。
+
+### 失敗訊號：`null` 或例外，都讓 `order_food` 不完成
 
 `ConductorWorkers.orderFoodTask` 收到 `null` 時，輸出 `{"orderId": null}` 並把 task 設為
 `FAILED`；非 `null` 時輸出 `orderId` 並設為 `COMPLETED`
 （`workers/ConductorWorkers.java:26-41`）。`order_food` 的 taskdef 設 `retryCount: 0`，
 並註明「Not idempotent: no retry」（`conductor/taskdefs/order_food.json`），
 因此這個 `FAILED` 會直接讓 workflow 失敗，而不是重試建立訂單。
+
+客戶 upsert 失敗走的是第二種失敗形狀：`insertCustomer` 拋出的 `DataAccessException`
+會穿出 `createOrder`，`orderFoodTask` 沒有攔截它（`workers/ConductorWorkers.java:26-41`
+只處理 `null`），因此該次 `order_food` 不可能被回報為 `COMPLETED`。無論是 `null` 或
+例外，都不會執行到 `insertOrder`，資料庫裡沒有可取消的訂單（Issue #87）。
 
 workflow 掛有 `failureWorkflow: FoodDeliveryFailureWorkflow`
 （`conductor/workflows/FoodDeliveryWorkflow.v1.json`）。該補償 workflow 的
@@ -150,7 +176,8 @@ workflow 掛有 `failureWorkflow: FoodDeliveryFailureWorkflow`
 已寫入、`orders_details` 失敗時，資料庫會有一筆補償涵蓋不到的 `PENDING` 訂單）；如今
 `createOrder` 的兩個 `INSERT` 由同一個交易包覆，失敗時不留下任何訂單列，假設已由實作保證——
 不需要、也不應該在補償 workflow 加 `order_food_ref` 分支：失敗時 `order_food` 輸出的
-`orderId` 是 `null`，資料庫裡本就沒有可取消的訂單。
+`orderId` 是 `null`，或在客戶 upsert 失敗時直接拋出例外，兩種情況資料庫裡本就沒有
+可取消的訂單。
 
 ## cancelOrder：補償語意
 
@@ -246,6 +273,7 @@ stateDiagram-v2
 | `OrderServiceTest` | `cancelOrderMarksExistingOrderCancelled` | 既有訂單取消回傳 `1`，DB 狀態轉 `CANCELLED` |
 | `OrderServiceTest` | `cancelOrderOnUnknownOrderReturnsZero` | 查無訂單回傳 `0`、不拋錯、不寫入任何列 |
 | `OrderServiceTest` | `createOrderLeavesNoPartialRowsWhenDetailsInsertFails` | 以 SQLite `TRIGGER` 令 `orders_details` 的 `INSERT` 失敗：`createOrder` 回傳 `null`，且 `orders` 與 `orders_details` 都不得殘留該訂單的列（Issue #86 REQ-1 交易回滾） |
+| `OrderServiceTest` | `createOrderFailsWhenCustomerInsertFails` | 以 SQLite `TRIGGER` 令 `customers` 的 `INSERT` 失敗：`createOrder` 拋出 `DataAccessException`，資料庫不得新增 `customerId = 0` 或指向不存在客戶的訂單列（Issue #87 REQ-1） |
 | `OrderServiceControllerTest` | `endpointForwardsRequestUnalteredToWorkflowService` | controller 恰好呼叫 service 一次，且傳遞同一個請求物件（不複製／不改寫） |
 | `OrderServiceControllerTest` | `endpointReturnsWorkflowServiceResponseVerbatim` | 成功時 HTTP 200，body 與 service 回傳的是同一個 map |
 | `OrderServiceControllerTest` | `endpointPassesThroughFailureResponse` | 失敗的 error map 也以 HTTP 200 原樣透出，controller 不攔截 |
@@ -255,6 +283,9 @@ stateDiagram-v2
 | `OrdersDAOTest` | `cancelOrderOnlyUpdatesStatusAndReportsMissingRow` | `cancelOrder` 只改 `status`，保留 `restaurantId`／`deliveryAddress`；查無訂單回傳 `0` |
 | `OrdersDAOTest` | `orderStatusSurvivesDatabaseRoundTrip` | 四個狀態可由 DB 文字往返，數量固定為 4 |
 | `OrdersDAOTest` | `insertCustomerIsIdempotentPerEmail` | 同一 email 重複建立客戶回傳同一 `id`，`customers` 只有一列 |
+| `OrdersDAOTest` | `insertCustomerThrowsDataAccessExceptionWhenInsertFails` | 以 SQLite `TRIGGER` 令 `customers` 的 `INSERT` 失敗：`insertCustomer` 拋出 `DataAccessException`，不得回傳 `0`，也不留下客戶列（Issue #87 REQ-2） |
+| `OrdersDAOTest` | `insertCustomerThrowsDataAccessExceptionWhenLookupFails` | 查詢 `customers` 失敗（無該表）時拋出 `DataAccessException`，不得吞掉例外回傳 `0`（Issue #87 REQ-2） |
+| `OrdersDAOTest` | `insertCustomerThrowsWhenInsertedRowCannotBeReadBack` | `INSERT` 後查不回客戶 `id` 時拋出 `DataAccessException`，不得把 `0` 當成有效 id（Issue #87 REQ-2） |
 | `OrdersDAOTest` | `duplicateOrderIdIsRejectedWithError` | 重複 `orderId` 時 `insertOrder` 回傳非空錯誤（`OrderService` 據此回 `null`） |
 | `OrdersDAOTest` | `readUnknownOrderLeavesFieldsUnset` | 回讀不存在的訂單不拋錯，也不覆寫欄位 |
 
