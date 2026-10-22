@@ -2,8 +2,8 @@
 //
 // 餐點外送 Saga（Orkes Conductor 編排）的 Quint 規格。
 // 對應來源：conductor/workflows/*.json、conductor/taskdefs/*.json、
-//           src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java 與 service/*。
-// 執行方式與涵蓋範圍見 specs/README.md。
+//           src/main/java/io/orkes/example/saga/workers/ConductorWorkers.java 與 service/*、dao/*。
+// 執行方式、涵蓋範圍與已知缺陷見 specs/README.md。
 
 // ===========================================================================
 // 型別 (Types)
@@ -14,10 +14,10 @@ module sagaTypes {
     | PreFixWorkflow    // ab60ba5 之前：make_payment_ref 分支為 cancel_payment → cancel_order
     | CurrentWorkflow   // 現行 conductor/workflows/FoodDeliveryFailureWorkflow.v1.json
 
-  // 資料庫實體狀態（對應 orders / payments / shipments 的 status 欄位）
+  // 資料庫實體狀態（對應 orders / payments / shipments 的 status 欄位；None = 沒有這一列）
   type OrderStatus    = OrderNone | OrderCreated | OrderCancelled
-  type PaymentStatus  = PaymentNone | PaymentPaid | PaymentCanceled
-  type ShipmentStatus = ShipmentNone | ShipmentConfirmed | ShipmentCanceled
+  type PaymentStatus  = PaymentNone | PaymentFailed | PaymentPaid | PaymentCanceled
+  type ShipmentStatus = ShipmentNone | ShipmentScheduled | ShipmentConfirmed | ShipmentCanceled
 
   type Db = {
     order:    OrderStatus,
@@ -25,10 +25,10 @@ module sagaTypes {
     shipment: ShipmentStatus,
   }
 
-  // 主 workflow 的 task reference name
+  // 主 workflow 的 task reference name（可能出現在 failedReferenceTaskNames 中者）
   type TaskRef =
     | OrderFoodRef | CheckInventoryRef | MakePaymentRef | ShipFoodRef
-    | NotifyDriverRef | NotifyCustomerRef
+    | NotifyDriverRef | NotifyCustomerRef | NotifyJoinRef
 
   // 正向流程的游標
   type Stage = AtOrderFood | AtCheckInventory | AtMakePayment | AtShipFood | AtNotifyFork | ForwardDone
@@ -37,15 +37,23 @@ module sagaTypes {
   type CompTask = CancelDelivery | CancelPayment | CancelOrder | NotifyFailure
 
   // Saga 整體階段：主 workflow + 補償 workflow 合併觀察
-  type Phase = Pending | Running | Completed | Compensating | Compensated | CompensationFailed
+  type Phase =
+    | Pending
+    | Running
+    | Completed            // 主 workflow COMPLETED
+    | MainFailed           // 主 workflow FAILED / TIMED_OUT，failureWorkflow 尚未進入 SWITCH
+    | Compensating         // 補償 workflow 執行中
+    | Compensated          // 補償 workflow COMPLETED
+    | CompensationFailed   // 補償 workflow FAILED
 
   type Saga = {
     phase:                   Phase,
     stage:                   Stage,
     forkDone:                Set[TaskRef],     // 並行分支已完成者
-    failedRefs:              Set[TaskRef],     // 對應 failedWorkflow.failedReferenceTaskNames
+    failedRefs:              Set[TaskRef],     // failedWorkflow.failedReferenceTaskNames（HashSet，無序）
     compQueue:               List[CompTask],   // 補償 workflow 尚未執行的步驟（有序）
     customerFailureNotified: bool,
+    compEnvFault:            bool,             // 補償 task 曾遇到基礎設施故障（重試用完仍失敗）
   }
 
   // 最近一次發生的 action（供 witness 與 trace 閱讀）
@@ -53,10 +61,18 @@ module sagaTypes {
     | ActInit
     | ActStart
     | ActOk(TaskRef)
-    | ActFail(TaskRef)
+    | ActFail(TaskRef)                     // task 以 FAILED / FAILED_WITH_TERMINAL_ERROR 結束
+    | ActPaymentInsertFail                 // make_payment：insertPayment 失敗，沒有付款列
+    | ActShipFoodFail(ShipmentStatus)      // ship_food 失敗後出貨單的狀態
+    | ActNotifyFailWithJoin(TaskRef)       // 並行分支失敗，且 JOIN 也搶先標成 FAILED（推論）
+    | ActTransientFail(TaskRef)            // 失敗後由 Conductor 重試成功（留下 FAILED 嘗試）
+    | ActTimeout({ task: TaskRef, applied: bool })  // TIMED_OUT；applied = 副作用已寫入但回報丟失
     | ActJoin
+    | ActSelect(TaskRef)                   // SWITCH 取 failedReferenceTaskNames[0]
+    | ActSelectDefault                     // 集合為空 → defaultCase
     | ActCompOk(CompTask)
     | ActCompTerminalError(CompTask)
+    | ActCompEnvFault(CompTask)
 }
 
 // ===========================================================================
@@ -72,10 +88,22 @@ module saga {
   var lastAction: Act
 
   // -------------------------------------------------------------------------
-  // 純函數：正向流程
+  // 常數集合
   // -------------------------------------------------------------------------
 
   pure val NOTIFY_TASKS: Set[TaskRef] = Set(NotifyDriverRef, NotifyCustomerRef)
+
+  // 會被 worker 執行的正向 task（JOIN 為系統 task，不在此列）
+  pure val FORWARD_TASKS: Set[TaskRef] =
+    Set(OrderFoodRef, CheckInventoryRef, MakePaymentRef, ShipFoodRef, NotifyDriverRef, NotifyCustomerRef)
+
+  pure val ALL_REFS: Set[TaskRef] = FORWARD_TASKS.union(Set(NotifyJoinRef))
+
+  // ship_food 失敗時出貨單可能的狀態（ShipmentService.createShipment）：
+  //   None      — insertShipment 失敗
+  //   Canceled  — 找不到司機，服務自行 cancelShipment
+  //   Scheduled — confirmShipment 拋出 DataAccessException，列停在 SCHEDULED
+  pure val SHIP_FAIL_OUTCOMES: Set[ShipmentStatus] = Set(ShipmentNone, ShipmentCanceled, ShipmentScheduled)
 
   pure val initDb: Db = { order: OrderNone, payment: PaymentNone, shipment: ShipmentNone }
 
@@ -86,53 +114,97 @@ module saga {
     failedRefs: Set(),
     compQueue: List(),
     customerFailureNotified: false,
+    compEnvFault: false,
   }
 
-  pure def runningAt(s: Saga, st: Stage): bool =
-    s.phase == Running and s.stage == st
+  // -------------------------------------------------------------------------
+  // 純函數：正向流程
+  // -------------------------------------------------------------------------
 
-  pure def advance(s: Saga, st: Stage): Saga = { ...s, stage: st }
+  pure def stageOf(t: TaskRef): Stage =
+    match t {
+      | OrderFoodRef      => AtOrderFood
+      | CheckInventoryRef => AtCheckInventory
+      | MakePaymentRef    => AtMakePayment
+      | ShipFoodRef       => AtShipFood
+      | NotifyDriverRef   => AtNotifyFork
+      | NotifyCustomerRef => AtNotifyFork
+      | NotifyJoinRef     => ForwardDone
+    }
 
-  pure def canNotify(s: Saga, t: TaskRef): bool =
-    runningAt(s, AtNotifyFork) and NOTIFY_TASKS.contains(t) and not(s.forkDone.contains(t))
+  pure def nextStage(st: Stage): Stage =
+    match st {
+      | AtOrderFood      => AtCheckInventory
+      | AtCheckInventory => AtMakePayment
+      | AtMakePayment    => AtShipFood
+      | AtShipFood       => AtNotifyFork
+      | AtNotifyFork     => ForwardDone
+      | ForwardDone      => ForwardDone
+    }
+
+  // task t 目前正在執行（已排程、尚未結束）
+  pure def isRunning(s: Saga, t: TaskRef): bool = and {
+    s.phase == Running,
+    FORWARD_TASKS.contains(t),
+    s.stage == stageOf(t),
+    not(s.forkDone.contains(t)),
+  }
+
+  // task 成功時寫入資料庫的副作用
+  pure def forwardEffect(d: Db, t: TaskRef): Db =
+    match t {
+      | OrderFoodRef   => { ...d, order: OrderCreated }
+      | MakePaymentRef => { ...d, payment: PaymentPaid }
+      | ShipFoodRef    => { ...d, shipment: ShipmentConfirmed }
+      | _              => d
+    }
+
+  pure def afterOk(s: Saga, t: TaskRef): Saga =
+    if (NOTIFY_TASKS.contains(t)) { ...s, forkDone: s.forkDone.union(Set(t)) }
+    else { ...s, stage: nextStage(s.stage) }
+
+  // 主 workflow 終止（FAILED / TIMED_OUT）。refs 是新增到 failedReferenceTaskNames 的 ref；
+  // TIMED_OUT 的 task 不會被加入（WorkflowExecutorOps.terminateWorkflow 只收 FAILED*）。
+  pure def terminateMain(s: Saga, refs: Set[TaskRef]): Saga =
+    { ...s, phase: MainFailed, stage: ForwardDone, failedRefs: s.failedRefs.union(refs) }
 
   pure def canJoin(s: Saga): bool =
-    runningAt(s, AtNotifyFork) and s.forkDone == NOTIFY_TASKS
+    s.phase == Running and s.stage == AtNotifyFork and s.forkDone == NOTIFY_TASKS
 
   // -------------------------------------------------------------------------
   // 純函數：補償 workflow
   // -------------------------------------------------------------------------
 
-  // FoodDeliveryFailureWorkflow 的 SWITCH(decisionCases) 表
-  pure def compensationPlan(wf: CompWorkflow, failed: TaskRef): List[CompTask] =
-    match failed {
-      | OrderFoodRef      => List()                                   // defaultCase: []
+  // FoodDeliveryFailureWorkflow 的 SWITCH(decisionCases) 表；未列出者走 defaultCase: []
+  pure def compensationPlan(wf: CompWorkflow, key: TaskRef): List[CompTask] =
+    match key {
       | CheckInventoryRef => List(CancelOrder)
-      | MakePaymentRef    => List(CancelPayment, CancelOrder)
+      | MakePaymentRef    => if (wf == PreFixWorkflow) List(CancelPayment, CancelOrder) else List(CancelOrder)
       | ShipFoodRef       => List(CancelPayment, CancelOrder)
       | NotifyDriverRef   => List(CancelDelivery, CancelPayment, CancelOrder)
       | NotifyCustomerRef => List(CancelDelivery, CancelPayment, CancelOrder)
+      | _                 => List()
     }
 
-  // 主 workflow 失敗 → 觸發補償 workflow：SWITCH 之後一律接 notify_customer_failure_ref
-  pure def startCompensation(wf: CompWorkflow, s: Saga, failed: TaskRef): Saga = {
-    ...s,
-    phase: Compensating,
-    stage: ForwardDone,
-    failedRefs: Set(failed),
-    compQueue: compensationPlan(wf, failed).append(NotifyFailure),
-  }
+  // SWITCH 之後一律執行 notify_customer_failure_ref
+  pure def startCompensation(s: Saga, plan: List[CompTask]): Saga =
+    { ...s, phase: Compensating, compQueue: plan.append(NotifyFailure) }
 
-  // 補償 task 回報 FAILED_WITH_TERMINAL_ERROR 的條件
-  pure def compTerminalError(wf: CompWorkflow, d: Db, t: CompTask): bool =
-    t == CancelPayment and wf == PreFixWorkflow and d.payment == PaymentNone
+  // cancel_* 的 UPDATE ... WHERE orderId=? 影響 0 列 → FAILED_WITH_TERMINAL_ERROR
+  pure def hasTargetRow(d: Db, t: CompTask): bool =
+    match t {
+      | CancelDelivery => d.shipment != ShipmentNone
+      | CancelPayment  => d.payment != PaymentNone
+      | CancelOrder    => d.order != OrderNone
+      | NotifyFailure  => true
+    }
 
-  // 補償 task 對資料庫的效果（假設成功）
+  // 補償 task 成功時對資料庫的效果（UPDATE 不看原狀態，一律改為 CANCELED）
   pure def applyComp(d: Db, t: CompTask): Db =
     match t {
-      | CancelDelivery => { ...d, shipment: if (d.shipment == ShipmentConfirmed) ShipmentCanceled else d.shipment }
-      | CancelPayment  => { ...d, payment: if (d.payment == PaymentPaid) PaymentCanceled else d.payment }
-      | CancelOrder    => { ...d, order: if (d.order == OrderCreated) OrderCancelled else d.order }
+      | CancelDelivery => { ...d, shipment: ShipmentCanceled }
+      | CancelPayment  => { ...d, payment: PaymentCanceled }
+      | CancelOrder    => { ...d, order: OrderCancelled }
       | NotifyFailure  => d
     }
 
@@ -151,11 +223,19 @@ module saga {
     }
   }
 
-  // 補償 workflow 自身 FAILED
-  pure def failComp(s: Saga): Saga = { ...s, phase: CompensationFailed, compQueue: List() }
+  pure def failComp(s: Saga, envFault: bool): Saga =
+    { ...s, phase: CompensationFailed, compQueue: List(), compEnvFault: s.compEnvFault or envFault }
+
+  // 仍然生效、需要被補償的副作用
+  pure def hasActiveEffects(d: Db): bool = or {
+    d.order == OrderCreated,
+    d.payment == PaymentPaid,
+    d.shipment == ShipmentScheduled,
+    d.shipment == ShipmentConfirmed,
+  }
 
   // -------------------------------------------------------------------------
-  // 狀態機
+  // 狀態機：正向流程
   // -------------------------------------------------------------------------
 
   action init: bool = all {
@@ -171,83 +251,80 @@ module saga {
     lastAction' = ActStart,
   }
 
-  // 1. order_food
-  action orderFoodOk: bool = all {
-    runningAt(saga, AtOrderFood),
-    db' = { ...db, order: OrderCreated },
-    saga' = advance(saga, AtCheckInventory),
-    lastAction' = ActOk(OrderFoodRef),
-  }
-
-  // insertOrder 失敗 → 回傳 null → FAILED；沒有訂單，無須補償
-  action orderFoodFail: bool = all {
-    runningAt(saga, AtOrderFood),
-    db' = db,
-    saga' = { ...saga, phase: Compensated, stage: ForwardDone, failedRefs: Set(OrderFoodRef) },
-    lastAction' = ActFail(OrderFoodRef),
-  }
-
-  // 2. check_inventory
-  action checkInventoryOk: bool = all {
-    runningAt(saga, AtCheckInventory),
-    db' = db,
-    saga' = advance(saga, AtMakePayment),
-    lastAction' = ActOk(CheckInventoryRef),
-  }
-
-  action checkInventoryFail: bool = all {
-    runningAt(saga, AtCheckInventory),
-    db' = db,
-    saga' = startCompensation(COMP_WORKFLOW, saga, CheckInventoryRef),
-    lastAction' = ActFail(CheckInventoryRef),
-  }
-
-  // 3. make_payment
-  action makePaymentOk: bool = all {
-    runningAt(saga, AtMakePayment),
-    db' = { ...db, payment: PaymentPaid },
-    saga' = advance(saga, AtShipFood),
-    lastAction' = ActOk(MakePaymentRef),
-  }
-
-  action makePaymentFail: bool = all {
-    runningAt(saga, AtMakePayment),
-    db' = db,
-    saga' = startCompensation(COMP_WORKFLOW, saga, MakePaymentRef),
-    lastAction' = ActFail(MakePaymentRef),
-  }
-
-  // 4. ship_food
-  action shipFoodOk: bool = all {
-    runningAt(saga, AtShipFood),
-    db' = { ...db, shipment: ShipmentConfirmed },
-    saga' = advance(saga, AtNotifyFork),
-    lastAction' = ActOk(ShipFoodRef),
-  }
-
-  action shipFoodFail: bool = all {
-    runningAt(saga, AtShipFood),
-    db' = db,
-    saga' = startCompensation(COMP_WORKFLOW, saga, ShipFoodRef),
-    lastAction' = ActFail(ShipFoodRef),
-  }
-
-  // 5. notify_fork（notify_driver / notify_customer 並行）
-  action notifyOk(t: TaskRef): bool = all {
-    canNotify(saga, t),
-    db' = db,
-    saga' = { ...saga, forkDone: saga.forkDone.union(Set(t)) },
+  // 任一正向 task 成功（COMPLETED）
+  action taskOk(t: TaskRef): bool = all {
+    isRunning(saga, t),
+    db' = forwardEffect(db, t),
+    saga' = afterOk(saga, t),
     lastAction' = ActOk(t),
   }
 
-  action notifyFail(t: TaskRef): bool = all {
-    canNotify(saga, t),
+  // 沒有副作用的失敗：
+  //   order_food      — insertOrder / insertCustomer 失敗 → FAILED
+  //   check_inventory — 無法供餐 → FAILED_WITH_TERMINAL_ERROR
+  //   notify_*        — worker 例外 → FAILED（retryCount 0）
+  action taskFail(t: TaskRef): bool = all {
+    isRunning(saga, t),
+    Set(OrderFoodRef, CheckInventoryRef).union(NOTIFY_TASKS).contains(t),
     db' = db,
-    saga' = startCompensation(COMP_WORKFLOW, saga, t),
+    saga' = terminateMain(saga, Set(t)),
     lastAction' = ActFail(t),
   }
 
-  // 6. notify_join
+  // make_payment：付款被拒（卡片過期等）。createPayment 先 insert PENDING，再改為 FAILED
+  action paymentDeclined: bool = all {
+    isRunning(saga, MakePaymentRef),
+    db' = { ...db, payment: PaymentFailed },
+    saga' = terminateMain(saga, Set(MakePaymentRef)),
+    lastAction' = ActFail(MakePaymentRef),
+  }
+
+  // make_payment：insertPayment 失敗（資料庫錯誤），沒有付款列
+  action paymentInsertFail: bool = all {
+    isRunning(saga, MakePaymentRef),
+    db' = db,
+    saga' = terminateMain(saga, Set(MakePaymentRef)),
+    lastAction' = ActPaymentInsertFail,
+  }
+
+  // ship_food 失敗（FAILED，retryCount 0）
+  action shipFoodFail(outcome: ShipmentStatus): bool = all {
+    isRunning(saga, ShipFoodRef),
+    SHIP_FAIL_OUTCOMES.contains(outcome),
+    db' = { ...db, shipment: outcome },
+    saga' = terminateMain(saga, Set(ShipFoodRef)),
+    lastAction' = ActShipFoodFail(outcome),
+  }
+
+  // 並行分支失敗，非同步 JOIN 在 decide 之前也把自己標成 FAILED（依原始碼推論的競態）
+  action notifyFailWithJoin(t: TaskRef): bool = all {
+    isRunning(saga, t),
+    NOTIFY_TASKS.contains(t),
+    db' = db,
+    saga' = terminateMain(saga, Set(t, NotifyJoinRef)),
+    lastAction' = ActNotifyFailWithJoin(t),
+  }
+
+  // check_inventory（retryCount 3）暫時失敗後由 Conductor 重試：
+  // FAILED 的嘗試留在 tasks[] 中，之後仍會被收進 failedReferenceTaskNames
+  action transientFail(t: TaskRef): bool = all {
+    isRunning(saga, t),
+    t == CheckInventoryRef,
+    not(saga.failedRefs.contains(t)),
+    db' = db,
+    saga' = { ...saga, failedRefs: saga.failedRefs.union(Set(t)) },
+    lastAction' = ActTransientFail(t),
+  }
+
+  // 任一正向 task 逾時（TIME_OUT_WF / 回應逾時且重試用完）→ workflow TIMED_OUT。
+  // applied = worker 已完成副作用但回報丟失。逾時的 task 不會進入 failedReferenceTaskNames。
+  action taskTimeout(t: TaskRef, applied: bool): bool = all {
+    isRunning(saga, t),
+    db' = if (applied) forwardEffect(db, t) else db,
+    saga' = terminateMain(saga, Set()),
+    lastAction' = ActTimeout({ task: t, applied: applied }),
+  }
+
   action joinComplete: bool = all {
     canJoin(saga),
     db' = db,
@@ -255,42 +332,90 @@ module saga {
     lastAction' = ActJoin,
   }
 
-  // 補償 workflow：執行佇列頭的 task
+  // -------------------------------------------------------------------------
+  // 狀態機：補償 workflow
+  // -------------------------------------------------------------------------
+
+  // SWITCH 取 failedReferenceTaskNames[0]。集合是 HashSet，[0] 取決於雜湊順序而非執行順序，
+  // 因此以「集合中任一元素」過度近似。
+  action selectCompensation(key: TaskRef): bool = all {
+    saga.phase == MainFailed,
+    saga.failedRefs.contains(key),
+    db' = db,
+    saga' = startCompensation(saga, compensationPlan(COMP_WORKFLOW, key)),
+    lastAction' = ActSelect(key),
+  }
+
+  // 集合為空（例如逾時）→ JSON 中沒有該 key → [0] 為 null → defaultCase: []
+  action selectDefaultCompensation: bool = all {
+    saga.phase == MainFailed,
+    saga.failedRefs == Set(),
+    db' = db,
+    saga' = startCompensation(saga, List()),
+    lastAction' = ActSelectDefault,
+  }
+
   action compensateOk: bool = all {
     hasPendingComp(saga),
-    not(compTerminalError(COMP_WORKFLOW, db, saga.compQueue.head())),
+    hasTargetRow(db, saga.compQueue.head()),
     db' = applyComp(db, saga.compQueue.head()),
     saga' = popComp(saga),
     lastAction' = ActCompOk(saga.compQueue.head()),
   }
 
+  // 查無目標列 → FAILED_WITH_TERMINAL_ERROR → 補償 workflow FAILED
   action compensateTerminalError: bool = all {
     hasPendingComp(saga),
-    compTerminalError(COMP_WORKFLOW, db, saga.compQueue.head()),
+    not(hasTargetRow(db, saga.compQueue.head())),
     db' = db,
-    saga' = failComp(saga),
+    saga' = failComp(saga, false),
     lastAction' = ActCompTerminalError(saga.compQueue.head()),
+  }
+
+  // 基礎設施故障：資料庫例外（FAILED）重試 3 次仍失敗，或 task 逾時
+  action compensateEnvFault: bool = all {
+    hasPendingComp(saga),
+    db' = db,
+    saga' = failComp(saga, true),
+    lastAction' = ActCompEnvFault(saga.compQueue.head()),
   }
 
   // 終態（Completed / Compensated / CompensationFailed）沒有可執行的 action：
   // quint run 的 trace 會在此提早結束，這是預期行為。
+  //
+  // 抽樣結構：nondet 只從「此刻可能啟用」的值中挑選，action 分成三組巢狀 any，
+  // 避免故障類 action 淹沒正常進度。這只影響 quint run 的抽樣機率，不改變可達狀態集合。
   action step: bool = {
-    nondet t = NOTIFY_TASKS.oneOf()
+    val running = FORWARD_TASKS.filter(x => isRunning(saga, x))
+    nondet t = (if (running == Set()) FORWARD_TASKS else running).oneOf()
+    nondet key = (if (saga.failedRefs == Set()) ALL_REFS else saga.failedRefs).oneOf()
+    nondet outcome = SHIP_FAIL_OUTCOMES.oneOf()
+    nondet applied = Set(true, false).oneOf()
     any {
-      startWorkflow,
-      orderFoodOk,
-      orderFoodFail,
-      checkInventoryOk,
-      checkInventoryFail,
-      makePaymentOk,
-      makePaymentFail,
-      shipFoodOk,
-      shipFoodFail,
-      notifyOk(t),
-      notifyFail(t),
-      joinComplete,
-      compensateOk,
-      compensateTerminalError,
+      // 正常進度
+      any {
+        startWorkflow,
+        taskOk(t),
+        joinComplete,
+        selectCompensation(key),
+        selectDefaultCompensation,
+        compensateOk,
+      },
+      // 業務失敗（worker 依程式邏輯回報失敗）
+      any {
+        taskFail(t),
+        paymentDeclined,
+        paymentInsertFail,
+        shipFoodFail(outcome),
+        compensateTerminalError,
+      },
+      // 基礎設施故障與 Conductor 執行時期行為
+      any {
+        transientFail(t),
+        taskTimeout(t, applied),
+        notifyFailWithJoin(t),
+        compensateEnvFault,
+      },
     }
   }
 
@@ -298,59 +423,74 @@ module saga {
   // 不變量
   // -------------------------------------------------------------------------
 
-  // 性質 1：終態一致性
-  val inv_eventual_consistency: bool =
-    if (saga.phase == Completed) {
-      db.order == OrderCreated and db.payment == PaymentPaid and db.shipment == ShipmentConfirmed
-    } else if (saga.phase == Compensated) {
-      db.order != OrderCreated and db.payment != PaymentPaid and db.shipment != ShipmentConfirmed
-    } else {
-      true
-    }
+  // 性質 1：主 workflow 成功時，三個實體都已生效
+  val inv_completed_consistent: bool =
+    (saga.phase == Completed) implies
+      (db.order == OrderCreated and db.payment == PaymentPaid and db.shipment == ShipmentConfirmed)
 
-  // 性質 2：回滾後無懸空副作用
+  // 性質 2：非成功的終態不得殘留生效中的副作用。
+  // 唯一例外：補償 task 本身遇到基礎設施故障（需人工介入，見性質 3）。
   val inv_no_dangling_effects: bool =
-    (saga.phase == Compensated) implies
-      (db.order != OrderCreated and db.payment != PaymentPaid and db.shipment != ShipmentConfirmed)
+    (saga.phase == Compensated or (saga.phase == CompensationFailed and not(saga.compEnvFault)))
+      implies not(hasActiveEffects(db))
 
-  // 性質 3：補償 workflow 不失敗
-  val inv_no_compensation_failure: bool = saga.phase != CompensationFailed
+  // 性質 3：補償 workflow 只會因基礎設施故障而失敗，不會因設計錯誤（例如取消不存在的資料）而失敗
+  val inv_compensation_failure_only_from_env: bool =
+    (saga.phase == CompensationFailed) implies saga.compEnvFault
 
   // 性質 4：出貨必先付款成功
   val inv_shipment_requires_payment: bool =
     (db.shipment == ShipmentConfirmed) implies (db.payment == PaymentPaid)
 
   val inv_safety: bool = and {
-    inv_eventual_consistency,
+    inv_completed_consistent,
     inv_no_dangling_effects,
-    inv_no_compensation_failure,
+    inv_compensation_failure_only_from_env,
     inv_shipment_requires_payment,
   }
 
   // -------------------------------------------------------------------------
   // Witness：每個 action 至少要在部分 trace 中發生（quint run --witnesses）
   // -------------------------------------------------------------------------
-  val w_start: bool                 = lastAction == ActStart
-  val w_order_food_ok: bool         = lastAction == ActOk(OrderFoodRef)
-  val w_order_food_fail: bool       = lastAction == ActFail(OrderFoodRef)
-  val w_check_inventory_ok: bool    = lastAction == ActOk(CheckInventoryRef)
-  val w_check_inventory_fail: bool  = lastAction == ActFail(CheckInventoryRef)
-  val w_make_payment_ok: bool       = lastAction == ActOk(MakePaymentRef)
-  val w_make_payment_fail: bool     = lastAction == ActFail(MakePaymentRef)
-  val w_ship_food_ok: bool          = lastAction == ActOk(ShipFoodRef)
-  val w_ship_food_fail: bool        = lastAction == ActFail(ShipFoodRef)
-  val w_notify_driver_ok: bool      = lastAction == ActOk(NotifyDriverRef)
-  val w_notify_driver_fail: bool    = lastAction == ActFail(NotifyDriverRef)
-  val w_notify_customer_ok: bool    = lastAction == ActOk(NotifyCustomerRef)
-  val w_notify_customer_fail: bool  = lastAction == ActFail(NotifyCustomerRef)
-  val w_join: bool                  = lastAction == ActJoin
-  val w_cancel_delivery_ok: bool    = lastAction == ActCompOk(CancelDelivery)
-  val w_cancel_payment_ok: bool     = lastAction == ActCompOk(CancelPayment)
-  val w_cancel_order_ok: bool       = lastAction == ActCompOk(CancelOrder)
-  val w_notify_failure_ok: bool     = lastAction == ActCompOk(NotifyFailure)
-  val w_comp_terminal_error: bool   = match lastAction { | ActCompTerminalError(_) => true | _ => false }
-  val w_completed: bool             = saga.phase == Completed
-  val w_compensated: bool           = saga.phase == Compensated
+  pure def isTimeout(a: Act): bool = match a { | ActTimeout(_) => true | _ => false }
+  pure def isTimeoutApplied(a: Act): bool = match a { | ActTimeout(r) => r.applied | _ => false }
+  pure def isSelect(a: Act): bool = match a { | ActSelect(_) => true | _ => false }
+  pure def isNotifyFailWithJoin(a: Act): bool = match a { | ActNotifyFailWithJoin(_) => true | _ => false }
+  pure def isCompTerminalError(a: Act): bool = match a { | ActCompTerminalError(_) => true | _ => false }
+  pure def isCompEnvFault(a: Act): bool = match a { | ActCompEnvFault(_) => true | _ => false }
+
+  val w_start: bool                  = lastAction == ActStart
+  val w_order_food_ok: bool          = lastAction == ActOk(OrderFoodRef)
+  val w_order_food_fail: bool        = lastAction == ActFail(OrderFoodRef)
+  val w_check_inventory_ok: bool     = lastAction == ActOk(CheckInventoryRef)
+  val w_check_inventory_fail: bool   = lastAction == ActFail(CheckInventoryRef)
+  val w_check_inventory_retry: bool  = lastAction == ActTransientFail(CheckInventoryRef)
+  val w_make_payment_ok: bool        = lastAction == ActOk(MakePaymentRef)
+  val w_payment_declined: bool       = lastAction == ActFail(MakePaymentRef)
+  val w_payment_insert_fail: bool    = lastAction == ActPaymentInsertFail
+  val w_ship_food_ok: bool           = lastAction == ActOk(ShipFoodRef)
+  val w_ship_fail_none: bool         = lastAction == ActShipFoodFail(ShipmentNone)
+  val w_ship_fail_canceled: bool     = lastAction == ActShipFoodFail(ShipmentCanceled)
+  val w_ship_fail_scheduled: bool    = lastAction == ActShipFoodFail(ShipmentScheduled)
+  val w_notify_driver_ok: bool       = lastAction == ActOk(NotifyDriverRef)
+  val w_notify_driver_fail: bool     = lastAction == ActFail(NotifyDriverRef)
+  val w_notify_customer_ok: bool     = lastAction == ActOk(NotifyCustomerRef)
+  val w_notify_customer_fail: bool   = lastAction == ActFail(NotifyCustomerRef)
+  val w_notify_fail_with_join: bool  = isNotifyFailWithJoin(lastAction)
+  val w_timeout: bool                = isTimeout(lastAction)
+  val w_timeout_applied: bool        = isTimeoutApplied(lastAction)
+  val w_join: bool                   = lastAction == ActJoin
+  val w_select: bool                 = isSelect(lastAction)
+  val w_select_default: bool         = lastAction == ActSelectDefault
+  val w_cancel_delivery_ok: bool     = lastAction == ActCompOk(CancelDelivery)
+  val w_cancel_payment_ok: bool      = lastAction == ActCompOk(CancelPayment)
+  val w_cancel_order_ok: bool        = lastAction == ActCompOk(CancelOrder)
+  val w_notify_failure_ok: bool      = lastAction == ActCompOk(NotifyFailure)
+  val w_comp_terminal_error: bool    = isCompTerminalError(lastAction)
+  val w_comp_env_fault: bool         = isCompEnvFault(lastAction)
+  val w_completed: bool              = saga.phase == Completed
+  val w_compensated: bool            = saga.phase == Compensated
+  val w_compensation_failed: bool    = saga.phase == CompensationFailed
 }
 
 // ===========================================================================
