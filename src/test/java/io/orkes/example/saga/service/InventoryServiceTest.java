@@ -3,7 +3,6 @@ package io.orkes.example.saga.service;
 import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.pojos.FoodItem;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -88,7 +87,6 @@ class InventoryServiceTest {
     }
 
     @Test
-    @Disabled("Issue #85：先在 01-test 交付紅燈案例，02-impl 修正判斷式後啟用")
     @DisplayName("邊界（Issue #85）：name 只有空白字元 → checkAvailability 回傳 false")
     void checkAvailabilityReturnsFalseForWhitespaceOnlyRestaurantName() throws Exception {
         int restaurantId = 900_000 + ThreadLocalRandom.current().nextInt(99_999);
@@ -116,7 +114,6 @@ class InventoryServiceTest {
     }
 
     @Test
-    @Disabled("Issue #85：先在 01-test 交付紅燈案例，02-impl 修正判斷式後啟用")
     @DisplayName("判斷式（Issue #85）：NULL 與空白名稱都不可用，非空白名稱才可用")
     void isUsableRestaurantNameRejectsNullAndBlankNames() {
         // restaurants.name 的 DDL 是 text NOT NULL，無法真的插入 NULL 資料列，

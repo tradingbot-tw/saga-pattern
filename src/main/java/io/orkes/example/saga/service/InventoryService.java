@@ -6,7 +6,6 @@ import io.orkes.example.saga.pojos.Restaurant;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
-import java.util.Objects;
 
 @Slf4j
 public class InventoryService {
@@ -22,11 +21,11 @@ public class InventoryService {
     }
 
     /**
-     * 「餐廳可用」的名稱判斷式。抽成獨立方法讓測試能直接驗證 NULL／空白邊界
+     * 「餐廳可用」的名稱判斷式：名稱非 {@code null} 且 {@link String#isBlank()} 為 false 才可用。
+     * 抽成獨立方法讓測試能直接驗證 NULL／空白邊界
      * （Issue #85：{@code restaurants.name} 是 {@code text NOT NULL}，無法以資料列製造 NULL）。
-     * 本層僅為測試接縫，行為與原本的 {@code !Objects.equals(name, "")} 相同。
      */
     static boolean isUsableRestaurantName(String name) {
-        return !Objects.equals(name, "");
+        return name != null && !name.isBlank();
     }
 }
