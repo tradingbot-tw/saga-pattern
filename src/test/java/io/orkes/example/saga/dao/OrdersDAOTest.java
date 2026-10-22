@@ -7,16 +7,22 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -188,5 +194,79 @@ class OrdersDAOTest {
 
         assertEquals(null, read.getOrderId(), "查無訂單時不應覆蓋 orderId");
         assertEquals(null, read.getStatus(), "查無訂單時不應覆蓋 status");
+    }
+
+    /** 在暫存資料庫上執行一條 DDL（Issue #87 以 TRIGGER 注入客戶寫入失敗）。 */
+    private static void exec(String sql) throws SQLException {
+        try (Connection conn = DriverManager.getConnection(url);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
+    }
+
+    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
+    @Test
+    @DisplayName("REQ-2 資料庫錯誤：customers 的 INSERT 失敗時 insertCustomer 拋出 DataAccessException，不得回傳 0")
+    void insertCustomerThrowsDataAccessExceptionWhenInsertFails() throws Exception {
+        Customer customer = new Customer();
+        customer.setEmail(SagaTestDb.uniqueId("uninsertable") + "@example.com");
+        customer.setName("無法寫入");
+        customer.setContact("+10000000000");
+
+        // 故障注入：BEFORE INSERT TRIGGER 讓 customers 的寫入一律失敗（該 email 不存在，
+        // 因此 insertCustomer 一定會走到 INSERT 分支）。
+        exec("CREATE TRIGGER issue87_fail_customer_insert BEFORE INSERT ON customers "
+                + "BEGIN SELECT RAISE(ABORT, 'Issue #87: simulated customers INSERT failure'); END");
+        try {
+            assertThrows(DataAccessException.class, () -> dao.insertCustomer(customer),
+                    "INSERT 失敗必須拋出 DataAccessException，不能把 0 當成有效 id 回傳");
+        } finally {
+            exec("DROP TRIGGER issue87_fail_customer_insert");
+        }
+
+        assertEquals(0, SagaTestDb.count(url,
+                        "SELECT COUNT(*) FROM customers WHERE email = '" + customer.getEmail() + "'"),
+                "寫入失敗時不得留下客戶列");
+    }
+
+    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
+    @Test
+    @DisplayName("REQ-2 資料庫錯誤：查詢 customers 失敗時 insertCustomer 拋出 DataAccessException，不得吞掉例外回傳 0")
+    void insertCustomerThrowsDataAccessExceptionWhenLookupFails() throws Exception {
+        // 沒有 customers 表的資料庫：第一個 SELECT 就會以 SQLException 失敗。
+        String schemaLessUrl = SagaTestDb.tempUrl("orders-noschema");
+        OrdersDAO schemaLessDao = new OrdersDAO(schemaLessUrl);
+
+        Customer customer = new Customer();
+        customer.setEmail(SagaTestDb.uniqueId("nolookup") + "@example.com");
+        customer.setName("查不到");
+        customer.setContact("+10000000000");
+
+        try {
+            assertThrows(DataAccessException.class, () -> schemaLessDao.insertCustomer(customer),
+                    "查詢失敗必須拋出 DataAccessException，不能吞掉例外後回傳 0");
+        } finally {
+            SagaTestDb.delete(schemaLessUrl);
+        }
+    }
+
+    @Disabled("Issue #87 01-test：修復前紅燈，02-impl 移除 @Disabled 並修復 OrdersDAO.insertCustomer")
+    @Test
+    @DisplayName("REQ-2 資料庫錯誤：INSERT 後查不回客戶 id 時拋出 DataAccessException，不得回傳 0")
+    void insertCustomerThrowsWhenInsertedRowCannotBeReadBack() throws Exception {
+        Customer customer = new Customer();
+        customer.setEmail(SagaTestDb.uniqueId("vanishing") + "@example.com");
+        customer.setName("寫入即消失");
+        customer.setContact("+10000000000");
+
+        // 故障注入：INSERT 成功後立刻刪除該列，模擬「寫入後查不回 id」的情境。
+        exec("CREATE TRIGGER issue87_drop_inserted_customer AFTER INSERT ON customers "
+                + "BEGIN DELETE FROM customers WHERE id = NEW.id; END");
+        try {
+            assertThrows(DataAccessException.class, () -> dao.insertCustomer(customer),
+                    "查不回客戶 id 時必須拋出 DataAccessException，不能把 0 當成有效 id 回傳");
+        } finally {
+            exec("DROP TRIGGER issue87_drop_inserted_customer");
+        }
     }
 }
