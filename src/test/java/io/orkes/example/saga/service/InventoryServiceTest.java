@@ -3,9 +3,16 @@ package io.orkes.example.saga.service;
 import io.orkes.example.saga.SagaTestDb;
 import io.orkes.example.saga.pojos.FoodItem;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 
@@ -17,7 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>service 把 DAO 連線字串寫死為 {@code jdbc:sqlite:food_delivery.db}，無法注入，
  * 因此沿用 {@link SagaTestDb#createAppSchema()} 準備的應用資料庫與種子餐廳（id 1..3）。
- * 本測試只讀不寫，避免與其他測試類別共享的資料庫互相干擾。
+ * 本測試原則上只讀不寫；唯一例外是空白名稱邊界測試，會暫插入一筆自訂餐廳，
+ * 斷言後立刻在 {@code finally} 刪除，避免與其他測試類別共享的資料庫互相干擾。
  */
 class InventoryServiceTest {
 
@@ -79,5 +87,62 @@ class InventoryServiceTest {
     @DisplayName("現有行為：items 也不能讓不存在的餐廳變成可用 → false")
     void itemListDoesNotMakeUnknownRestaurantAvailable() {
         assertFalse(InventoryService.checkAvailability(999, items("burger", 1)));
+    }
+
+    // ===================================================================
+    // Issue #85：「餐廳可用」判斷的空白／NULL 邊界。
+    //
+    // 現行實作 `!Objects.equals(name, "")` 只比對空字串：name 為空白字串或
+    // NULL 時仍回 true（可用），與 docs/modules/inventory.md §2.1 描述的
+    // 缺陷一致。以下兩個測試在修復（02-impl）前是紅燈，先以 @Disabled
+    // 提交（斷言完整保留），02-impl 層解開並修復判斷式。
+    // ===================================================================
+
+    @Test
+    @Disabled("Issue #85 修復前紅燈：空白名稱目前被視為可用。02-impl 修復後啟用")
+    @DisplayName("邊界（Issue #85）：name 為空白字串的餐廳 → checkAvailability 回傳 false")
+    void checkAvailabilityReturnsFalseForBlankNameRestaurant() throws SQLException {
+        int restaurantId = insertRestaurant("   ");
+        try {
+            assertFalse(InventoryService.checkAvailability(restaurantId, items("burger", 1)),
+                    "名稱只有空白的餐廳不具備可用名稱，應回傳 false");
+        } finally {
+            deleteRestaurant(restaurantId);
+        }
+    }
+
+    @Test
+    @Disabled("Issue #85 修復前紅燈：NULL 名稱目前被視為可用。02-impl 修復後啟用")
+    @DisplayName("邊界（Issue #85）：name 為 NULL → 判斷式回傳 false（NOT NULL 限制無法插入，直接驗證 hasUsableName）")
+    void nullNameIsNotUsable() {
+        assertFalse(InventoryService.hasUsableName(null),
+                "NULL 名稱不具備可用名稱，應回傳 false");
+    }
+
+    /** 在應用資料庫插入一筆自訂名稱的餐廳，回傳其 id（僅供 Issue #85 邊界測試）。 */
+    private static int insertRestaurant(String name) throws SQLException {
+        try (Connection conn = DriverManager.getConnection(SagaTestDb.APP_DB_URL);
+             PreparedStatement pstmt = conn.prepareStatement(
+                     "INSERT INTO restaurants(name, address, contact) VALUES(?, ?, ?)",
+                     Statement.RETURN_GENERATED_KEYS)) {
+            pstmt.setString(1, name);
+            pstmt.setString(2, "Issue85 temporary row");
+            pstmt.setString(3, "+1000000000");
+            pstmt.executeUpdate();
+            try (ResultSet keys = pstmt.getGeneratedKeys()) {
+                assertTrue(keys.next(), "插入餐廳後應取得自動產生的 id");
+                return keys.getInt(1);
+            }
+        }
+    }
+
+    /** 刪除 {@link #insertRestaurant(String)} 插入的暫列，避免干擾其他測試。 */
+    private static void deleteRestaurant(int restaurantId) throws SQLException {
+        try (Connection conn = DriverManager.getConnection(SagaTestDb.APP_DB_URL);
+             PreparedStatement pstmt = conn.prepareStatement(
+                     "DELETE FROM restaurants WHERE id = ?")) {
+            pstmt.setInt(1, restaurantId);
+            pstmt.executeUpdate();
+        }
     }
 }
