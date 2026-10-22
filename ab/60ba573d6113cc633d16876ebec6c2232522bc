@@ -1,0 +1,14 @@
+src/test/java/io/orkes/example/saga/workers/SagaFlawReproductionTest.java
+  h_a7614621effce7 3-4,13,20-23,28,51,60-76,80-81,95-97,103,105,109,113-114,120-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ab60ba573d6113cc633d16876ebec6c2232522bc",
+  "prompts": {},
+  "humans": {
+    "h_a7614621effce7": {
+      "author": "tradingbot-tw <tradingbot.tw@gmail.com>"
+    }
+  }
+}
