@@ -18,6 +18,7 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -200,6 +201,33 @@ class ConductorWorkersTest {
         assertEquals(TaskResult.Status.FAILED, result.getStatus());
         assertFalse(result.getOutputData().containsKey("driverId"),
                 "失敗時不得輸出 driverId，避免下游把未指派的司機當成有效值");
+    }
+
+    @Test
+    @Disabled("Issue #84：修復前 worker 看不到 confirmShipment 的失敗，02-impl 會 un-skip")
+    @DisplayName("重試語義：ship_food 確認出貨失敗時回傳 FAILED（可重試）、帶原因且不輸出 driverId")
+    void shipFoodFailsRetryablyWhenConfirmFails() throws Exception {
+        String orderId = SagaTestDb.uniqueId("order");
+        ShippingRequest request = shippingRequest(orderId);
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_confirm_shipment_worker BEFORE UPDATE ON shipments "
+                    + "WHEN NEW.status = 'CONFIRMED' BEGIN SELECT RAISE(ABORT, 'simulated confirm failure'); END");
+            try {
+                TaskResult result = workers.shipFoodTask(request);
+
+                assertEquals(TaskResult.Status.FAILED, result.getStatus(),
+                        "資料庫確認失敗是可重試的失敗，不得回報 COMPLETED");
+                assertFalse(result.getOutputData().containsKey("driverId"),
+                        "確認失敗時不得輸出 driverId，避免下游把未確認的出貨當成有效值");
+                assertNotNull(result.getReasonForIncompletion(), "失敗原因必須寫進 reasonForIncompletion");
+                assertTrue(result.getReasonForIncompletion().contains("simulated confirm failure"),
+                        "原因應保留資料庫錯誤訊息，實際為: " + result.getReasonForIncompletion());
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_confirm_shipment_worker");
+            }
+        }
     }
 
     @Test

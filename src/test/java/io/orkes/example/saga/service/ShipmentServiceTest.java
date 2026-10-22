@@ -1,10 +1,12 @@
 package io.orkes.example.saga.service;
 
 import io.orkes.example.saga.SagaTestDb;
+import io.orkes.example.saga.dao.DataAccessException;
 import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.Shipment;
 import io.orkes.example.saga.pojos.ShippingRequest;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +22,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -149,6 +152,54 @@ class ShipmentServiceTest {
 
         assertEquals(0, shipmentCount(orderId), "寫入失敗不應留下部分寫入的外送紀錄");
         assertNull(statusOf(orderId), "沒有外送紀錄就沒有狀態");
+    }
+
+    @Test
+    @Disabled("Issue #84：修復前 confirmShipment 吞掉 SQLException，02-impl 會 un-skip")
+    @DisplayName("確認失敗：confirmShipment 的 UPDATE 失敗時 createShipment 拋出 DataAccessException，且 DB 不得停在 CONFIRMED")
+    void createShipmentPropagatesWhenConfirmFails() throws SQLException {
+        String orderId = SagaTestDb.uniqueId("order");
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER fail_confirm_shipment BEFORE UPDATE ON shipments "
+                    + "WHEN NEW.status = 'CONFIRMED' BEGIN SELECT RAISE(ABORT, 'simulated confirm failure'); END");
+            try {
+                DataAccessException thrown = assertThrows(DataAccessException.class,
+                        () -> ShipmentService.createShipment(shippingRequest(orderId)),
+                        "確認失敗時必須往外拋，不得回傳 driverId 假裝成功");
+                assertTrue(thrown.getMessage().contains("simulated confirm failure"),
+                        "例外訊息應保留資料庫錯誤，實際為: " + thrown.getMessage());
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS fail_confirm_shipment");
+            }
+        }
+
+        assertNotEquals(Shipment.Status.CONFIRMED.name(), statusOf(orderId),
+                "確認失敗時外送單不得停在 CONFIRMED");
+    }
+
+    @Test
+    @Disabled("Issue #84：修復前 confirmShipment 忽略受影響列數，02-impl 會 un-skip")
+    @DisplayName("確認失敗：confirmShipment 未更新任何列時 createShipment 仍須拋出 DataAccessException")
+    void createShipmentPropagatesWhenConfirmUpdatesNoRows() throws SQLException {
+        String orderId = SagaTestDb.uniqueId("order");
+
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TRIGGER skip_confirm_shipment BEFORE UPDATE ON shipments "
+                    + "WHEN NEW.status = 'CONFIRMED' BEGIN SELECT RAISE(IGNORE); END");
+            try {
+                assertThrows(DataAccessException.class,
+                        () -> ShipmentService.createShipment(shippingRequest(orderId)),
+                        "UPDATE 沒有命中任何列也是確認失敗，不得回傳 driverId");
+            } finally {
+                stmt.execute("DROP TRIGGER IF EXISTS skip_confirm_shipment");
+            }
+        }
+
+        assertNotEquals(Shipment.Status.CONFIRMED.name(), statusOf(orderId),
+                "確認失敗時外送單不得停在 CONFIRMED");
     }
 
     @Test
