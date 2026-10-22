@@ -17,10 +17,14 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * 驗證針對 Quint 形式規格反例所做的修正：
- * 1. 工作流層級：FoodDeliveryFailureWorkflow.v1.json 在 make_payment_ref 失敗時不再無效呼叫 cancel_payment。
+ * 驗證針對 Quint 形式規格反例所做的修正（specs/saga_test.qnt 的
+ * {@code defect_prefix_payment_insert_failure_test}；該反例只在 insertPayment 失敗、沒有付款列時出現，
+ * 付款被拒時已有 FAILED 付款列，舊 workflow 的 cancel_payment 仍會成功）：
+ * 1. 工作流層級：FoodDeliveryFailureWorkflow.v1.json 在 make_payment_ref 失敗時不再呼叫 cancel_payment。
  * 2. 業務層級：make_payment 失敗時正確依序回滾 cancel_order，確保訂單狀態成功轉為 CANCELLED，達成最終一致性。
  * 3. 安全防護：查無訂單時仍具備終端錯誤防護，防止無效 ID 誤報成功。
+ *
+ * <p>現行 workflow 仍有的已知缺陷見 specs/README.md「已知缺陷」。
  */
 class SagaFlawReproductionTest {
 
