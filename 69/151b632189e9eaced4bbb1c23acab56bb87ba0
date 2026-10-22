@@ -1,0 +1,14 @@
+src/test/java/io/orkes/example/saga/e2e/OrkesCloudE2EVerificationTest.java
+  h_a7614621effce7 1-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "69151b632189e9eaced4bbb1c23acab56bb87ba0",
+  "prompts": {},
+  "humans": {
+    "h_a7614621effce7": {
+      "author": "tradingbot-tw <tradingbot.tw@gmail.com>"
+    }
+  }
+}
