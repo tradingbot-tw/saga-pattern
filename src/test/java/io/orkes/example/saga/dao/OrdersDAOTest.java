@@ -7,21 +7,30 @@ import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderDetails;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link OrdersDAO} 的行為測試（Issue #9）：訂單寫入/回讀、狀態機轉換（補償路徑）、
  * 客戶 upsert 的冪等性，以及重複訂單 id 的失敗訊號。
+ *
+ * <p>Issue #87（REQ-2）：以 SQLite {@code TRIGGER} 注入 {@code customers} 的寫入失敗，
+ * 驗證 {@code insertCustomer} 遭遇資料庫錯誤時拋出 {@link DataAccessException}
+ * 而不是回傳 {@code 0} 當成有效 id；「依 email 沿用既有客戶 id」的冪等行為不受影響。
  */
 class OrdersDAOTest {
 
@@ -188,5 +197,87 @@ class OrdersDAOTest {
 
         assertEquals(null, read.getOrderId(), "查無訂單時不應覆蓋 orderId");
         assertEquals(null, read.getStatus(), "查無訂單時不應覆蓋 status");
+    }
+
+    /** 在暫存資料庫上執行一條 DDL（Issue #87 以 TRIGGER 注入 customers 的寫入故障）。 */
+    private static void exec(String sql) throws Exception {
+        try (Connection conn = DriverManager.getConnection(url);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
+    }
+
+    private static Customer newCustomer(String emailPrefix) {
+        Customer customer = new Customer();
+        customer.setEmail(SagaTestDb.uniqueId(emailPrefix) + "@example.com");
+        customer.setName("測試客戶");
+        customer.setContact("+10000000000");
+        return customer;
+    }
+
+    @Test
+    @Disabled("Issue #87 紅燈測試：修復前 insertCustomer 吞掉 SQLException 並回傳 0；02-impl 層 un-disable")
+    @DisplayName("REQ-2 資料庫錯誤：customers 的 INSERT 失敗時 insertCustomer 拋出 DataAccessException 而非回傳 0")
+    void insertCustomerThrowsDataAccessExceptionOnDbError() throws Exception {
+        Customer customer = newCustomer("boom");
+
+        // 故障注入（REQ-2 的驗證方式）：email 不存在，查找 miss 後必然走到 INSERT；
+        // BEFORE INSERT TRIGGER 以 RAISE(ABORT) 令寫入拋出 SQLException。
+        exec("CREATE TRIGGER issue87_dao_fail_customer BEFORE INSERT ON customers "
+                + "BEGIN SELECT RAISE(ABORT, 'Issue #87: simulated customers INSERT failure'); END");
+
+        DataAccessException thrown;
+        try {
+            thrown = assertThrows(DataAccessException.class, () -> dao.insertCustomer(customer),
+                    "資料庫錯誤必須拋出 DataAccessException（與 cancelOrder 一致），不得回傳 0 當成有效 id");
+        } finally {
+            exec("DROP TRIGGER issue87_dao_fail_customer");
+        }
+
+        assertTrue(thrown.getCause() instanceof java.sql.SQLException,
+                "例外必須包裝原始 SQLException，讓呼叫端可辨識資料庫故障");
+        assertEquals(0, SagaTestDb.count(url,
+                        "SELECT COUNT(*) FROM customers WHERE email = '" + customer.getEmail() + "'"),
+                "失敗的 INSERT 不得留下客戶列");
+    }
+
+    @Test
+    @Disabled("Issue #87 紅燈測試：修復前 INSERT 未落庫時 insertCustomer 仍回傳查無資料的 0；02-impl 層 un-disable")
+    @DisplayName("REQ-2 回讀邊界：INSERT 未真正落庫（回讀查無列）時不得回傳 0，必須拋出 DataAccessException")
+    void insertCustomerThrowsWhenWrittenRowCannotBeReadBack() throws Exception {
+        Customer customer = newCustomer("ghostrow");
+
+        // RAISE(IGNORE) 讓 BEFORE INSERT trigger 靜默略過寫入：INSERT 不報錯但列也不落庫，
+        // 模擬「寫入成功、回讀卻查無」的資料庫錯誤變體——同樣不得把 0 當成有效 id 回傳。
+        exec("CREATE TRIGGER issue87_ignore_customer_insert BEFORE INSERT ON customers "
+                + "BEGIN SELECT RAISE(IGNORE); END");
+
+        try {
+            assertThrows(DataAccessException.class, () -> dao.insertCustomer(customer),
+                    "回讀查無該 email 的列時必須拋出 DataAccessException，不得回傳 0");
+        } finally {
+            exec("DROP TRIGGER issue87_ignore_customer_insert");
+        }
+    }
+
+    @Test
+    @DisplayName("做法 3 冪等沿用：email 已存在時直接沿用既有 id，即使 customers 的 INSERT 被 TRIGGER 擋下")
+    void insertCustomerReusesExistingIdEvenWhenInsertWouldFail() throws Exception {
+        Customer existing = newCustomer("keeper");
+        int id = dao.insertCustomer(existing);
+        assertTrue(id > 0, "新客戶應取得 autoincrement id");
+
+        exec("CREATE TRIGGER issue87_dao_fail_customer BEFORE INSERT ON customers "
+                + "BEGIN SELECT RAISE(ABORT, 'Issue #87: simulated customers INSERT failure'); END");
+        try {
+            Customer repeat = new Customer();
+            repeat.setEmail(existing.getEmail());
+            repeat.setName("同一个人第二次請求");
+            repeat.setContact("+22222222222");
+
+            assertEquals(id, dao.insertCustomer(repeat), "查找命中時必須沿用既有 id，不受寫入故障影響");
+        } finally {
+            exec("DROP TRIGGER issue87_dao_fail_customer");
+        }
     }
 }

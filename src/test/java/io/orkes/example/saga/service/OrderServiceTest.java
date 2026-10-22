@@ -1,10 +1,12 @@
 package io.orkes.example.saga.service;
 
 import io.orkes.example.saga.SagaTestDb;
+import io.orkes.example.saga.dao.DataAccessException;
 import io.orkes.example.saga.pojos.FoodItem;
 import io.orkes.example.saga.pojos.Order;
 import io.orkes.example.saga.pojos.OrderRequest;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +20,7 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * {@link OrderService} 的步驟行為測試（Issue #60）。
@@ -31,6 +34,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  *
  * <p>Issue #86（REQ-1）另以 SQLite {@code TRIGGER} 注入 {@code orders_details} 的
  * {@code INSERT} 失敗，驗證訂單主檔與明細的寫入被交易包覆：明細失敗時不留下任何半成品列。
+ *
+ * <p>Issue #87（REQ-1）以 SQLite {@code TRIGGER} 注入 {@code customers} 的
+ * {@code INSERT} 失敗，驗證客戶寫入失敗時 {@code createOrder} 讓例外往外拋，
+ * 不得以 {@code customerId = 0} 建立指向不存在客戶的訂單列。
  */
 class OrderServiceTest {
 
@@ -183,5 +190,38 @@ class OrderServiceTest {
                         "SELECT COUNT(*) FROM orders_details WHERE orderId IN "
                                 + "(SELECT orderId FROM orders WHERE " + customerFilter + ")"),
                 "orders_details 亦不得殘留任何列");
+    }
+
+    /** orders 表中指向不存在的客戶（customerId = 0）的列數。 */
+    private static int customerIdZeroOrderCount() throws Exception {
+        return SagaTestDb.count(URL, "SELECT COUNT(*) FROM orders WHERE customerId = 0");
+    }
+
+    @Test
+    @Disabled("Issue #87 紅燈測試：修復前 insertCustomer 吞掉 SQLException、createOrder 以 customerId = 0 建單；02-impl 層 un-disable")
+    @DisplayName("REQ-1 客戶寫入失敗：createOrder 拋出 DataAccessException，不得以 customerId = 0 留下訂單列")
+    void createOrderFailsWithoutCustomerIdZeroWhenCustomersInsertFails() throws Exception {
+        String email = SagaTestDb.uniqueId("nocust") + "@example.com";
+
+        // 故障注入（REQ-1 的驗證方式）：BEFORE INSERT TRIGGER 讓 customers 的寫入一律以
+        // RAISE(ABORT) 失敗；email 為本次唯一，步驟 1 的查找必定 miss，必然走到 INSERT 失敗路徑。
+        exec("CREATE TRIGGER issue87_fail_customer BEFORE INSERT ON customers "
+                + "BEGIN SELECT RAISE(ABORT, 'Issue #87: simulated customers INSERT failure'); END");
+
+        int zeroBefore = customerIdZeroOrderCount();
+        try {
+            assertThrows(DataAccessException.class,
+                    () -> OrderService.createOrder(
+                            request(email, "43 West 4th Street, New York NY 10024")),
+                    "客戶寫入失敗時 createOrder 必須讓例外往外拋，而不是以 customerId = 0 建立訂單");
+        } finally {
+            exec("DROP TRIGGER issue87_fail_customer");
+        }
+
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM customers WHERE email = '" + email + "'"),
+                "失敗的 INSERT 不得留下客戶列");
+        assertEquals(zeroBefore, customerIdZeroOrderCount(),
+                "createOrder 不得新增以 customerId = 0 指向不存在客戶的訂單列");
     }
 }
