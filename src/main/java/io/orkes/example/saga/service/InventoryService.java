@@ -6,7 +6,6 @@ import io.orkes.example.saga.pojos.Restaurant;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
-import java.util.Objects;
 
 @Slf4j
 public class InventoryService {
@@ -18,6 +17,15 @@ public class InventoryService {
         restaurant.setId(restaurantId);
         restaurant.setName("");
         inventoryDAO.readRestaurant(restaurantId, restaurant);
-        return !Objects.equals(restaurant.getName(), "");
+        return isUsableRestaurantName(restaurant.getName());
+    }
+
+    /**
+     * 「餐廳可用」的名稱判斷式：名稱非 {@code null} 且 {@link String#isBlank()} 為 false 才可用。
+     * 抽成獨立方法讓測試能直接驗證 NULL／空白邊界
+     * （Issue #85：{@code restaurants.name} 是 {@code text NOT NULL}，無法以資料列製造 NULL）。
+     */
+    static boolean isUsableRestaurantName(String name) {
+        return name != null && !name.isBlank();
     }
 }

@@ -15,13 +15,24 @@ public class OrdersDAO extends BaseDAO {
         super(url);
     }
 
+    /**
+     * 在單一連線、單一交易內寫入訂單與明細（Issue #86）。
+     *
+     * <p>兩個 {@code INSERT} 共用同一個連線並以 {@code setAutoCommit(false)} 包覆；
+     * 任何一步失敗都先 {@code rollback} 再回傳非空錯誤訊息，資料庫不得留下半成品列——
+     * 否則 {@code orders} 已提交、{@code orders_details} 失敗時，該 {@code PENDING}
+     * 訂單不在任何補償流程的涵蓋範圍內，會永遠滯留。
+     *
+     * <p>回傳契約不變（呼叫端 {@code OrderService.createOrder} 依賴）：
+     * 成功回傳空字串、失敗回傳非空錯誤訊息。
+     */
     public String insertOrder(Order order) {
         Date date = new Date();
         Timestamp nowAsTS = new Timestamp(date.getTime());
 
         String itemsStr = String.join("", order.getOrderDetails().getItems().toString());
 
-        String notesStr = null;
+        String notesStr;
 
         if(!order.getOrderDetails().getNotes().isEmpty()) {
             notesStr = String.join("", order.getOrderDetails().getNotes().toString());
@@ -29,34 +40,51 @@ public class OrdersDAO extends BaseDAO {
             notesStr = "";
         }
 
-        String sql = "INSERT INTO orders(orderId,customerId,restaurantId,deliveryAddress,createdAt,status) VALUES(?,?,?,?,?,?)";
+        String sqlOrder = "INSERT INTO orders(orderId,customerId,restaurantId,deliveryAddress,createdAt,status) VALUES(?,?,?,?,?,?)";
+        String sqlDetails = "INSERT INTO orders_details(orderId,items,notes) VALUES(?,?,?)";
 
-        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, order.getOrderId());
-            pstmt.setInt(2, order.getCustomer().getId());
-            pstmt.setInt(3, order.getRestaurantId());
-            pstmt.setString(4, order.getDeliveryAddress());
-            pstmt.setTimestamp(5, nowAsTS);
-            pstmt.setString(6, order.getStatus().name());
-            pstmt.executeUpdate();
+        try (Connection conn = this.connect()) {
+            conn.setAutoCommit(false);
+            try (PreparedStatement orderStmt = conn.prepareStatement(sqlOrder);
+                 PreparedStatement detailsStmt = conn.prepareStatement(sqlDetails)) {
+                orderStmt.setString(1, order.getOrderId());
+                orderStmt.setInt(2, order.getCustomer().getId());
+                orderStmt.setInt(3, order.getRestaurantId());
+                orderStmt.setString(4, order.getDeliveryAddress());
+                orderStmt.setTimestamp(5, nowAsTS);
+                orderStmt.setString(6, order.getStatus().name());
+                orderStmt.executeUpdate();
+
+                detailsStmt.setString(1, order.getOrderId());
+                detailsStmt.setString(2, itemsStr);
+                detailsStmt.setString(3, notesStr);
+                detailsStmt.executeUpdate();
+
+                conn.commit();
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException rollbackError) {
+                    System.out.println(rollbackError.getMessage());
+                }
+                System.out.println(e.getMessage());
+                return errorMessage(e);
+            }
         } catch (SQLException e) {
             System.out.println(e.getMessage());
-            return e.getMessage();
-        }
-
-        sql = "INSERT INTO orders_details(orderId,items,notes) VALUES(?,?,?)";
-
-        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, order.getOrderId());
-            pstmt.setString(2, itemsStr);
-            pstmt.setString(3, notesStr);
-            pstmt.executeUpdate();
-        } catch (SQLException e) {
-            System.out.println(e.getMessage());
-            return e.getMessage();
+            return errorMessage(e);
         }
 
         return "";
+    }
+
+    /**
+     * 保證失敗回傳值「非空」：SQLException 的 message 可能為 null／空字串，
+     * 後退為例外字串，維持呼叫端以 {@code isEmpty()} 判成敗的契約。
+     */
+    private static String errorMessage(SQLException e) {
+        String message = e.getMessage();
+        return (message == null || message.isEmpty()) ? e.toString() : message;
     }
 
     /**

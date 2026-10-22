@@ -8,6 +8,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 
@@ -24,6 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  *
  * <p>service 層把 DAO 連線字串寫死為 {@code jdbc:sqlite:food_delivery.db}，
  * 因此本測試沿用應用的資料庫檔（.gitignore 已排除），並用唯一 email／orderId 隔開各情境。
+ *
+ * <p>Issue #86（REQ-1）另以 SQLite {@code TRIGGER} 注入 {@code orders_details} 的
+ * {@code INSERT} 失敗，驗證訂單主檔與明細的寫入被交易包覆：明細失敗時不留下任何半成品列。
  */
 class OrderServiceTest {
 
@@ -66,6 +73,14 @@ class OrderServiceTest {
         return SagaTestDb.count(URL,
                 "SELECT COUNT(*) FROM orders WHERE customerId = "
                         + "(SELECT id FROM customers WHERE email = '" + email + "')");
+    }
+
+    /** 在應用資料庫上執行一條 DDL（Issue #86 以 TRIGGER 注入明細寫入失敗）。 */
+    private static void exec(String sql) throws SQLException {
+        try (Connection conn = DriverManager.getConnection(URL);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute(sql);
+        }
     }
 
     @Test
@@ -133,5 +148,40 @@ class OrderServiceTest {
                 "查無訂單時 service 回傳 0、不拋錯");
 
         assertNull(statusInDb(ghostOrderId), "不存在的訂單不應被寫入任何狀態");
+    }
+
+    @Test
+    @DisplayName("REQ-1 交易回滾：orders_details 的 INSERT 失敗時，createOrder 回傳 null 且 orders 與 orders_details 都不得留下該訂單的列")
+    void createOrderLeavesNoPartialRowsWhenDetailsInsertFails() throws Exception {
+        String email = SagaTestDb.uniqueId("rollbuy") + "@example.com";
+
+        // 故障注入（REQ-1 的驗證方式）：BEFORE INSERT TRIGGER 讓 orders_details 的寫入
+        // 一律以 RAISE(ABORT) 失敗，不需要修改 main 程式碼或表結構。
+        exec("CREATE TRIGGER issue86_fail_details BEFORE INSERT ON orders_details "
+                + "BEGIN SELECT RAISE(ABORT, 'Issue #86: simulated orders_details INSERT failure'); END");
+
+        String orderId;
+        try {
+            orderId = OrderService.createOrder(
+                    request(email, "5331 Redford Court, Montgomery AL 36116"));
+        } finally {
+            exec("DROP TRIGGER issue86_fail_details");
+        }
+
+        // 回傳契約不變（做法 3）：明細失敗時 createOrder 仍回傳 null，order_food 據此轉 FAILED。
+        assertNull(orderId, "明細寫入失敗時 createOrder 必須回傳 null");
+
+        // orderId 由 service 內部生成、失敗時不回傳，故以本次唯一 email 對應的 customerId
+        // 鎖定「該訂單」；createOrder 在 insertOrder 之前必定先 upsert customers，
+        // 該列不在交易範圍內（另有工單），保留它才能定位本輪嘗試建立的訂單。
+        String customerFilter = "customerId = (SELECT id FROM customers WHERE email = '" + email + "')";
+
+        assertEquals(0, SagaTestDb.count(URL, "SELECT COUNT(*) FROM orders WHERE " + customerFilter),
+                "orders_details 失敗時 orders 必須被回滾，不得留下半成品列");
+
+        assertEquals(0, SagaTestDb.count(URL,
+                        "SELECT COUNT(*) FROM orders_details WHERE orderId IN "
+                                + "(SELECT orderId FROM orders WHERE " + customerFilter + ")"),
+                "orders_details 亦不得殘留任何列");
     }
 }

@@ -49,15 +49,22 @@ public class ShipmentDAO extends BaseDAO {
         }
     }
 
-    public void confirmShipment(String orderId) {
+    /**
+     * 確認外送單，回傳受影響的列數（Issue #84：確認失敗不再 silent no-op）。
+     *
+     * <p>回傳 {@code 0} 代表該 {@code orderId} 沒有可確認的外送單；SQLException 包成
+     * {@link DataAccessException}，與 {@link #cancelShipment(String)} 的做法一致，
+     * 讓 service／worker 能把失敗回報給 Conductor，而不是假裝成功。
+     */
+    public int confirmShipment(String orderId) {
         String sql = "UPDATE shipments SET status=? WHERE orderId=?;";
 
         try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
             pstmt.setString(1, Shipment.Status.CONFIRMED.name());
             pstmt.setString(2, orderId);
-            pstmt.executeUpdate();
+            return pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException("Failed to confirm shipment for order " + orderId, e);
         }
     }
 
