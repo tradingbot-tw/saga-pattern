@@ -6,7 +6,6 @@ import io.orkes.example.saga.dao.ShipmentDAO;
 import io.orkes.example.saga.pojos.Shipment;
 import io.orkes.example.saga.pojos.ShippingRequest;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -160,8 +159,6 @@ class ShipmentServiceTest {
     }
 
     @Test
-    @Disabled("Issue #84 紅燈測試：既有缺陷——ShipmentDAO.confirmShipment 吞掉 SQLException，"
-            + "createShipment 在外送單仍停在 SCHEDULED 時誤回傳 driverId；於 02-impl 修復層啟用")
     @DisplayName("確認失敗：confirmShipment 的 UPDATE 被拒時 createShipment 必須拋 DataAccessException，不得標成 CONFIRMED")
     void createShipmentPropagatesConfirmFailure() throws SQLException {
         String orderId = SagaTestDb.uniqueId("order");

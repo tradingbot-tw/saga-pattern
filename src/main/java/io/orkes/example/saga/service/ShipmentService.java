@@ -40,6 +40,9 @@ public class ShipmentService {
         }
         else {
             log.info("Assigned driver {} to order with id: {}", driverId, orderId);
+            // Issue #84：confirmShipment 失敗拋出的 DataAccessException 刻意不在此攔截——
+            // 必須往外傳，否則 createShipment 會在外送單仍停在 SCHEDULED 時回傳 driverId，
+            // 讓 ship_food worker 誤標 COMPLETED，下游 notify_driver 與補償跟著錯誤成功訊號行動。
             shipmentDAO.confirmShipment(orderId);
         }
 

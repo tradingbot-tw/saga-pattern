@@ -17,7 +17,6 @@ import io.orkes.example.saga.pojos.ShippingRequest;
 import io.orkes.example.saga.service.OrderService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -203,8 +202,6 @@ class ConductorWorkersTest {
     }
 
     @Test
-    @Disabled("Issue #84 紅燈測試：既有缺陷——confirmShipment 的資料庫失敗被 DAO 吞掉，"
-            + "shipFoodTask 在外送單仍停在 SCHEDULED 時誤報 COMPLETED；於 02-impl 修復層啟用")
     @DisplayName("重試語義：ship_food 確認失敗時回傳 FAILED 並帶原因，不得輸出 driverId")
     void shipFoodFailsRetryablyWhenConfirmShipmentFails() throws Exception {
         ShippingRequest request = shippingRequest(SagaTestDb.uniqueId("order"));
