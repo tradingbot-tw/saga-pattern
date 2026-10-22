@@ -216,7 +216,6 @@ class OrdersDAOTest {
     }
 
     @Test
-    @Disabled("Issue #87 紅燈測試：修復前 insertCustomer 吞掉 SQLException 並回傳 0；02-impl 層 un-disable")
     @DisplayName("REQ-2 資料庫錯誤：customers 的 INSERT 失敗時 insertCustomer 拋出 DataAccessException 而非回傳 0")
     void insertCustomerThrowsDataAccessExceptionOnDbError() throws Exception {
         Customer customer = newCustomer("boom");
@@ -242,7 +241,6 @@ class OrdersDAOTest {
     }
 
     @Test
-    @Disabled("Issue #87 紅燈測試：修復前 INSERT 未落庫時 insertCustomer 仍回傳查無資料的 0；02-impl 層 un-disable")
     @DisplayName("REQ-2 回讀邊界：INSERT 未真正落庫（回讀查無列）時不得回傳 0，必須拋出 DataAccessException")
     void insertCustomerThrowsWhenWrittenRowCannotBeReadBack() throws Exception {
         Customer customer = newCustomer("ghostrow");

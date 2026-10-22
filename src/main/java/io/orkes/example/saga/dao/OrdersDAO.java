@@ -147,21 +147,29 @@ public class OrdersDAO extends BaseDAO {
         }
     }
 
+    /**
+     * 寫入客戶並回傳有效客戶 id（Issue #87）。
+     *
+     * <p>依 {@code email} 冪等：查找命中就沿用既有 id（不更新 name／contact）。
+     * 任何資料庫錯誤——查找失敗、{@code INSERT} 失敗、回讀失敗或回讀查無列——都
+     * 拋出 {@link DataAccessException}（與 {@link #cancelOrder(String)}、
+     * {@link #updateOrder(Order)} 一致），不再以 {@code System.out.println} 吞掉
+     * {@link SQLException} 後回傳 {@code 0}：{@code 0} 不是有效 id，呼叫端
+     * {@code OrderService.createOrder} 會把它寫進訂單，留下指向不存在客戶的列。
+     */
     public int insertCustomer(Customer customer) {
-        int id = 0;
-
-        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement("SELECT id FROM customers WHERE email = ?")) {
+        try (Connection conn = this.connect();
+             PreparedStatement pstmt = conn.prepareStatement("SELECT id FROM customers WHERE email = ?")) {
             pstmt.setString(1, customer.getEmail());
             ResultSet rs = pstmt.executeQuery();
             if (rs.next()) {
-                id = rs.getInt("id");
+                int id = rs.getInt("id");
+                if (id > 0) {
+                    return id;
+                }
             }
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
-        }
-
-        if (id > 0) {
-            return id;
+            throw new DataAccessException("Failed to look up customer " + customer.getEmail(), e);
         }
 
         String sql = "INSERT INTO customers(email,name,contact) VALUES(?,?,?)";
@@ -172,16 +180,25 @@ public class OrdersDAO extends BaseDAO {
             pstmt.setString(3, customer.getContact());
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException("Failed to insert customer " + customer.getEmail(), e);
         }
 
-        try (Connection conn = this.connect(); PreparedStatement pstmt = conn.prepareStatement("SELECT id FROM customers WHERE email = ?")) {
+        try (Connection conn = this.connect();
+             PreparedStatement pstmt = conn.prepareStatement("SELECT id FROM customers WHERE email = ?")) {
             pstmt.setString(1, customer.getEmail());
             ResultSet rs = pstmt.executeQuery();
-            id = rs.getInt("id");
+            if (rs.next()) {
+                int id = rs.getInt("id");
+                if (id > 0) {
+                    return id;
+                }
+            }
         } catch (SQLException e) {
-            System.out.println(e.getMessage());
+            throw new DataAccessException("Failed to read back customer id for " + customer.getEmail(), e);
         }
-        return id;
+
+        // 寫入後回讀查無列（含 INSERT 未真正落庫的變體）同屬資料庫錯誤：
+        // 回傳 0 會被呼叫端當成有效 id，故一律拋出例外。
+        throw new DataAccessException("Customer id not found after insert for " + customer.getEmail(), null);
     }
 }

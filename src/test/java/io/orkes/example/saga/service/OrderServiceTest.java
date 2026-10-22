@@ -198,7 +198,6 @@ class OrderServiceTest {
     }
 
     @Test
-    @Disabled("Issue #87 紅燈測試：修復前 insertCustomer 吞掉 SQLException、createOrder 以 customerId = 0 建單；02-impl 層 un-disable")
     @DisplayName("REQ-1 客戶寫入失敗：createOrder 拋出 DataAccessException，不得以 customerId = 0 留下訂單列")
     void createOrderFailsWithoutCustomerIdZeroWhenCustomersInsertFails() throws Exception {
         String email = SagaTestDb.uniqueId("nocust") + "@example.com";
